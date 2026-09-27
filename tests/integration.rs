@@ -1123,7 +1123,7 @@ fn state_json_required_fields_present_with_null_for_options() {
 #[test]
 fn all_commands_use_schema_version_0_2() {
     // Already verified individually above; this test documents the invariant.
-    assert_eq!(agent_exec::schema::SCHEMA_VERSION, "0.3");
+    assert_eq!(agent_exec::schema::SCHEMA_VERSION, "0.4");
 }
 
 // ── contract v0.1: retryable field ─────────────────────────────────────────────
@@ -11045,4 +11045,767 @@ fn mutable_abandonment_unknown_job_is_a_job_domain_error() {
             "{args:?} -> {v}"
         );
     }
+}
+
+// ── root-bound job references (schema 0.4) ────────────────────────────────────
+
+/// Producer side: every successful launch response names the absolute jobs root
+/// that owns the returned ID, so the response alone is a complete reference.
+#[test]
+fn root_reference_launch_builders_publish_the_absolute_root() {
+    let h = TestHarness::new();
+
+    let run = h.run(&["run", "echo", "run"]);
+    assert_envelope(&run, "run", true);
+    assert_eq!(run["root"].as_str().unwrap_or(""), h.root(), "run: {run}");
+
+    let create = h.run(&["create", "echo", "created"]);
+    assert_envelope(&create, "create", true);
+    assert_eq!(
+        create["root"].as_str().unwrap_or(""),
+        h.root(),
+        "create: {create}"
+    );
+    let created_id = create["job_id"]
+        .as_str()
+        .expect("created job_id")
+        .to_string();
+
+    let start = h.run(&["start", &created_id]);
+    assert_envelope(&start, "start", true);
+    assert_eq!(
+        start["root"].as_str().unwrap_or(""),
+        h.root(),
+        "start: {start}"
+    );
+
+    let restart = h.run(&["restart", &created_id]);
+    assert_envelope(&restart, "restart", true);
+    assert_eq!(
+        restart["root"].as_str().unwrap_or(""),
+        h.root(),
+        "restart: {restart}"
+    );
+
+    for response in [&run, &create, &start, &restart] {
+        let root = response["root"].as_str().expect("root field");
+        assert!(
+            std::path::Path::new(root).is_absolute(),
+            "published root must be absolute: {response}"
+        );
+    }
+}
+
+/// A relative `--root` is absolutized against the caller's cwd, not the
+/// workload's `--cwd`, and the same resolved value is used for storage.
+#[test]
+fn root_reference_absolutizes_a_relative_root_against_the_caller_cwd() {
+    let caller = tempfile::tempdir().expect("caller cwd");
+    let workload = tempfile::tempdir().expect("workload cwd");
+    std::fs::create_dir_all(caller.path().join("jobs")).expect("create relative root");
+
+    let (value, status) = run_cmd_with_root_and_cwd(
+        &[
+            "--root",
+            "jobs",
+            "run",
+            "--cwd",
+            workload.path().to_str().expect("workload cwd utf-8"),
+            "echo",
+            "relative",
+        ],
+        None,
+        Some(caller.path()),
+    );
+    assert!(status.success(), "run must succeed: {value}");
+    let published = value["root"].as_str().expect("root field");
+    // Absolutization prepends the cwd the OS reports for the child, which on
+    // macOS is the physical path behind the temp-dir symlink. The relative
+    // segment itself is never canonicalized.
+    let expected = std::fs::canonicalize(caller.path())
+        .expect("canonicalize caller cwd")
+        .join("jobs");
+    assert_eq!(
+        published,
+        expected.to_str().expect("expected root"),
+        "root must be absolutized against the caller cwd: {value}"
+    );
+
+    let job_id = value["job_id"].as_str().expect("job_id");
+    assert!(
+        std::path::Path::new(published).join(job_id).is_dir(),
+        "the published root must be the storage root: {value}"
+    );
+}
+
+/// Old launch JSON, which predates the `root` field, still deserializes.
+#[test]
+fn root_reference_keeps_old_launch_responses_deserializable() {
+    let legacy = r#"{
+        "schema_version": "0.3", "ok": true, "type": "run",
+        "job_id": "abc123", "state": "exited", "tags": [],
+        "stdout_log_path": "/tmp/stdout.log", "stderr_log_path": "/tmp/stderr.log",
+        "elapsed_ms": 1, "waited_ms": 0, "stdout": "", "stderr": "",
+        "stdout_range": [0, 0], "stderr_range": [0, 0],
+        "stdout_total_bytes": 0, "stderr_total_bytes": 0, "encoding": "utf-8-lossy"
+    }"#;
+    let data: agent_exec::schema::RunData =
+        serde_json::from_str(legacy).expect("old launch JSON must stay deserializable");
+    assert_eq!(data.job_id, "abc123");
+    assert!(
+        data.root.is_empty(),
+        "absent root must default rather than fail"
+    );
+
+    let legacy_create =
+        r#"{"job_id":"abc","state":"created","stdout_log_path":"/o","stderr_log_path":"/e"}"#;
+    let create: agent_exec::schema::CreateData =
+        serde_json::from_str(legacy_create).expect("old create JSON must stay deserializable");
+    assert!(create.root.is_empty());
+}
+
+/// Consumer side: a saved CLI launch result selects its own job from a foreign
+/// cwd and a foreign `AGENT_EXEC_ROOT`.
+#[test]
+fn root_reference_wait_from_json_file_ignores_environment_and_cwd() {
+    let producer = TestHarness::new();
+    let consumer = TestHarness::new();
+    let elsewhere = tempfile::tempdir().expect("foreign cwd");
+
+    let launch = producer.run(&["run", "--until", "0", "sh", "-c", "sleep 0.3; echo done"]);
+    let reference_path = elsewhere.path().join("reference.json");
+    std::fs::write(
+        &reference_path,
+        serde_json::to_string(&launch).expect("serialize launch"),
+    )
+    .expect("write reference");
+
+    let (waited, status) = run_cmd_with_root_and_cwd(
+        &[
+            "wait",
+            "--from-json",
+            reference_path.to_str().expect("reference path"),
+            "--until",
+            "20",
+        ],
+        Some(consumer.root()),
+        Some(elsewhere.path()),
+    );
+    assert!(status.success(), "wait must succeed: {waited}");
+    assert_envelope(&waited, "wait", true);
+    assert_eq!(waited["job_id"], launch["job_id"], "{waited}");
+    assert_eq!(waited["exit_code"].as_i64(), Some(0), "{waited}");
+}
+
+/// A real MCP launch result, saved byte-for-byte, is consumable by CLI wait even
+/// though the consumer's environment selects a different root that holds a job
+/// with the very same ID.
+#[test]
+fn root_reference_mcp_launch_handoff_binds_to_the_producing_root() {
+    let producer = TestHarness::new();
+    let consumer = TestHarness::new();
+    let elsewhere = tempfile::tempdir().expect("foreign cwd");
+
+    let launch = {
+        let mut mcp = support::McpProcess::start(producer.root());
+        mcp.initialize();
+        let launch = mcp.call(
+            2,
+            "run",
+            serde_json::json!({ "command": ["sh", "-c", "sleep 0.3; echo mcp"], "until": 0 }),
+        );
+        assert_envelope(&launch, "run", true);
+        launch
+    };
+    let job_id = launch["job_id"].as_str().expect("job_id").to_string();
+    assert_eq!(
+        launch["root"].as_str().unwrap_or(""),
+        producer.root(),
+        "MCP launch must publish its root: {launch}"
+    );
+
+    // A decoy with the identical ID in the consumer's own root: the reference must
+    // not observe it. It is terminal from the start, so binding to it would show a
+    // different (drained, exit_code 0 but stdout-empty) observation.
+    let decoy = std::path::Path::new(consumer.root()).join(&job_id);
+    std::fs::create_dir_all(&decoy).expect("create decoy job dir");
+    std::fs::copy(
+        std::path::Path::new(producer.root())
+            .join(&job_id)
+            .join("meta.json"),
+        decoy.join("meta.json"),
+    )
+    .expect("copy decoy meta");
+    std::fs::write(
+        decoy.join("state.json"),
+        serde_json::json!({
+            "status": "exited", "exit_code": 42,
+            "updated_at": "2020-01-01T00:00:00Z", "logs_drained": true
+        })
+        .to_string(),
+    )
+    .expect("write decoy state");
+    std::fs::write(decoy.join("stdout.log"), b"DECOY\n").expect("decoy stdout");
+    std::fs::write(decoy.join("stderr.log"), b"").expect("decoy stderr");
+
+    let reference_path = elsewhere.path().join("mcp-launch.json");
+    std::fs::write(
+        &reference_path,
+        serde_json::to_string(&launch).expect("serialize MCP launch"),
+    )
+    .expect("write reference");
+
+    let (waited, status) = run_cmd_with_root_and_cwd(
+        &[
+            "wait",
+            "--from-json",
+            reference_path.to_str().expect("reference path"),
+            "--until",
+            "20",
+        ],
+        Some(consumer.root()),
+        Some(elsewhere.path()),
+    );
+    assert!(status.success(), "wait must succeed: {waited}");
+    assert_eq!(waited["job_id"].as_str(), Some(job_id.as_str()), "{waited}");
+    assert_eq!(
+        waited["exit_code"].as_i64(),
+        Some(0),
+        "the reference must observe the producing root, not the decoy: {waited}"
+    );
+    assert!(
+        !waited["stdout"].as_str().unwrap_or("").contains("DECOY"),
+        "the reference must not bind to the consumer-root job: {waited}"
+    );
+}
+
+/// The MCP text body and its `structuredContent` object are interchangeable
+/// references, and stdin is accepted as the transport.
+#[test]
+fn root_reference_wait_from_json_stdin_accepts_the_mcp_text_body() {
+    let producer = TestHarness::new();
+    let consumer = TestHarness::new();
+
+    let (structured, text) = {
+        let mut mcp = support::McpProcess::start(producer.root());
+        mcp.initialize();
+        mcp.call_with_text(
+            2,
+            "run",
+            serde_json::json!({ "command": ["sh", "-c", "sleep 0.2; echo parity"], "until": 0 }),
+        )
+    };
+    assert_envelope(&structured, "run", true);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&text).expect("text body is JSON"),
+        structured,
+        "the MCP text body must be the same document as structuredContent"
+    );
+
+    for body in [
+        text.clone(),
+        serde_json::to_string(&structured).expect("serialize structured"),
+    ] {
+        let waited = run_cmd_with_root_and_stdin(
+            &["wait", "--from-json", "-", "--until", "20"],
+            Some(consumer.root()),
+            body.as_bytes(),
+        );
+        assert_envelope(&waited, "wait", true);
+        assert_eq!(waited["job_id"], structured["job_id"], "{waited}");
+        assert_eq!(waited["exit_code"].as_i64(), Some(0), "{waited}");
+    }
+}
+
+/// Absence in the referenced root fails; it never falls back to the environment
+/// root and never resolves a prefix.
+#[test]
+fn root_reference_absence_never_falls_back_or_matches_a_prefix() {
+    let referenced = TestHarness::new();
+    let consumer = TestHarness::new();
+
+    // A job that would match as a prefix, and a same-prefix job in the fallback
+    // root: neither may be observed.
+    let present = consumer.run(&["run", "echo", "fallback"]);
+    let present_id = present["job_id"].as_str().expect("job_id").to_string();
+    let missing_id = format!("{}ff", &present_id[..8]);
+
+    let reference = serde_json::json!({
+        "schema_version": "0.4", "ok": true, "type": "run",
+        "job_id": missing_id, "root": referenced.root(),
+    });
+    let waited = run_cmd_with_root_and_stdin(
+        &["wait", "--from-json", "-"],
+        Some(consumer.root()),
+        reference.to_string().as_bytes(),
+    );
+    assert_envelope(&waited, "error", false);
+    assert_eq!(waited["error"]["code"], "job_not_found", "{waited}");
+    assert_eq!(
+        waited["error"]["details"]["root"].as_str(),
+        Some(referenced.root()),
+        "diagnostics must report the referenced root: {waited}"
+    );
+
+    // Even the exact prefix of an existing job in the referenced root must not bind.
+    let in_referenced = referenced.run(&["run", "echo", "prefix"]);
+    let full_id = in_referenced["job_id"]
+        .as_str()
+        .expect("job_id")
+        .to_string();
+    let prefix_reference = serde_json::json!({
+        "ok": true, "job_id": &full_id[..8], "root": referenced.root(),
+    });
+    let prefix_waited = run_cmd_with_root_and_stdin(
+        &["wait", "--from-json", "-"],
+        Some(consumer.root()),
+        prefix_reference.to_string().as_bytes(),
+    );
+    assert_envelope(&prefix_waited, "error", false);
+    assert_eq!(
+        prefix_waited["error"]["code"], "job_not_found",
+        "a reference must never resolve a prefix: {prefix_waited}"
+    );
+}
+
+/// Selector conflicts and a missing selector are usage errors (exit 2) that never
+/// read the reference document.
+#[test]
+fn root_reference_selector_conflicts_are_usage_errors() {
+    let h = TestHarness::new();
+    let unreadable = std::path::Path::new(h.root()).join("never-read.json");
+
+    assert_usage_error(&["wait"], Some(h.root()));
+    assert_usage_error(
+        &[
+            "wait",
+            "--from-json",
+            unreadable.to_str().expect("path"),
+            "SOME_JOB_ID",
+        ],
+        Some(h.root()),
+    );
+    // An explicit --root conflicts with a reference in either flag position.
+    assert_usage_error(
+        &[
+            "--root",
+            h.root(),
+            "wait",
+            "--from-json",
+            unreadable.to_str().expect("path"),
+        ],
+        None,
+    );
+    assert_usage_error(
+        &[
+            "wait",
+            "--from-json",
+            unreadable.to_str().expect("path"),
+            "--root",
+            h.root(),
+        ],
+        None,
+    );
+    assert!(
+        !unreadable.exists(),
+        "a rejected invocation must not create or require the reference file"
+    );
+}
+
+/// Invalid reference documents are rejected as `invalid_argument` with exit 1,
+/// without echoing the supplied document and without inferring a root.
+#[test]
+fn root_reference_invalid_documents_are_rejected_without_echoing_input() {
+    let h = TestHarness::new();
+    let launched = h.run(&["run", "echo", "real"]);
+    let real_id = launched["job_id"].as_str().expect("job_id").to_string();
+
+    let structured_wrapper = serde_json::json!({ "structuredContent": launched }).to_string();
+    let rpc_wrapper =
+        serde_json::json!({ "jsonrpc": "2.0", "id": 1, "result": launched }).to_string();
+
+    let cases: Vec<(&str, String)> = vec![
+        ("not JSON", "{not json".to_string()),
+        ("not an object", "[]".to_string()),
+        ("MCP tool wrapper", structured_wrapper),
+        ("JSON-RPC wrapper", rpc_wrapper),
+        (
+            "ok=false",
+            serde_json::json!({ "ok": false, "job_id": &real_id, "root": h.root() }).to_string(),
+        ),
+        (
+            "missing ok",
+            serde_json::json!({ "job_id": &real_id, "root": h.root() }).to_string(),
+        ),
+        (
+            "missing root",
+            serde_json::json!({ "ok": true, "job_id": &real_id }).to_string(),
+        ),
+        (
+            "relative root",
+            serde_json::json!({ "ok": true, "job_id": &real_id, "root": "relative/jobs" })
+                .to_string(),
+        ),
+        (
+            "empty root",
+            serde_json::json!({ "ok": true, "job_id": &real_id, "root": "" }).to_string(),
+        ),
+        (
+            "NUL in root",
+            format!(
+                r#"{{"ok":true,"job_id":"{real_id}","root":"{}\u0000x"}}"#,
+                h.root()
+            ),
+        ),
+        (
+            "NUL in job_id",
+            format!(r#"{{"ok":true,"job_id":"a\u0000b","root":"{}"}}"#, h.root()),
+        ),
+        (
+            "path separator in job_id",
+            serde_json::json!({ "ok": true, "job_id": "a/b", "root": h.root() }).to_string(),
+        ),
+        (
+            "backslash in job_id",
+            serde_json::json!({ "ok": true, "job_id": "a\\b", "root": h.root() }).to_string(),
+        ),
+        (
+            "drive-relative job_id",
+            serde_json::json!({ "ok": true, "job_id": "C:x", "root": h.root() }).to_string(),
+        ),
+        (
+            "parent traversal job_id",
+            serde_json::json!({ "ok": true, "job_id": "..", "root": h.root() }).to_string(),
+        ),
+        (
+            "current dir job_id",
+            serde_json::json!({ "ok": true, "job_id": ".", "root": h.root() }).to_string(),
+        ),
+        (
+            "empty job_id",
+            serde_json::json!({ "ok": true, "job_id": "", "root": h.root() }).to_string(),
+        ),
+        (
+            "incompatible schema_version",
+            serde_json::json!({
+                "ok": true, "schema_version": "1.0",
+                "job_id": &real_id, "root": h.root()
+            })
+            .to_string(),
+        ),
+        (
+            "malformed schema_version",
+            serde_json::json!({
+                "ok": true, "schema_version": "0.4.1",
+                "job_id": &real_id, "root": h.root()
+            })
+            .to_string(),
+        ),
+    ];
+
+    for (label, document) in cases {
+        let output = run_raw_with_root_and_stdin(
+            &["wait", "--from-json", "-"],
+            Some(h.root()),
+            Some(document.as_bytes()),
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{label}: expected exit 1 (not a usage error)\nstdout: {stdout}"
+        );
+        let value: serde_json::Value =
+            serde_json::from_str(stdout.trim()).expect("stdout stays JSON-only");
+        assert_envelope(&value, "error", false);
+        assert_eq!(
+            value["error"]["code"], "invalid_argument",
+            "{label}: {value}"
+        );
+        assert_eq!(value["error"]["retryable"], false, "{label}: {value}");
+        assert!(
+            !stdout.contains(&real_id) || label == "MCP tool wrapper",
+            "{label}: rejection must not echo the document: {stdout}"
+        );
+    }
+
+    // Oversized input is bounded and rejected without buffering the whole body.
+    let mut oversized = format!(
+        r#"{{"ok":true,"job_id":"{real_id}","root":"{}","pad":""#,
+        h.root()
+    )
+    .into_bytes();
+    oversized.resize(agent_exec::reference::MAX_REFERENCE_BYTES + 1, b'x');
+    oversized.extend_from_slice(br#""}"#);
+    let output = run_raw_with_root_and_stdin(
+        &["wait", "--from-json", "-"],
+        Some(h.root()),
+        Some(&oversized),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "oversized: {stdout}");
+    let value: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("oversized rejection is JSON");
+    assert_eq!(value["error"]["code"], "invalid_argument", "{value}");
+
+    // An unreadable reference file is the same class of rejection.
+    let missing = std::path::Path::new(h.root()).join("absent.json");
+    let value = run_cmd_with_root(
+        &["wait", "--from-json", missing.to_str().expect("path")],
+        Some(h.root()),
+    );
+    assert_eq!(value["error"]["code"], "invalid_argument", "{value}");
+}
+
+/// Missing-job diagnostics name the root that was actually searched, for both
+/// positional-ID lookup and reference lookup.
+#[test]
+fn root_reference_missing_job_diagnostics_report_the_searched_root() {
+    let h = TestHarness::new();
+
+    let value = h.run(&["status", "NONEXISTENT_ROOT_REFERENCE"]);
+    assert_envelope(&value, "error", false);
+    assert_eq!(value["error"]["code"], "job_not_found", "{value}");
+    assert_eq!(
+        value["error"]["details"]["root"].as_str(),
+        Some(h.root()),
+        "{value}"
+    );
+    assert_eq!(
+        value["error"]["details"]["job_id"].as_str(),
+        Some("NONEXISTENT_ROOT_REFERENCE"),
+        "{value}"
+    );
+    let message = value["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains("NONEXISTENT_ROOT_REFERENCE") && message.contains(h.root()),
+        "message must name the ID and the searched root: {message}"
+    );
+    assert_eq!(value["error"]["retryable"], false, "{value}");
+}
+
+/// Selecting the parent of a jobs root reports the parent and fails; it never
+/// searches child directories for the ID.
+#[test]
+fn root_reference_parent_root_failure_reports_the_parent_without_searching_children() {
+    let parent = tempfile::tempdir().expect("parent dir");
+    let jobs = parent.path().join("jobs");
+    std::fs::create_dir_all(&jobs).expect("create jobs root");
+    let jobs_root = jobs.to_str().expect("jobs root utf-8");
+
+    let launched = run_cmd_with_root(&["run", "echo", "child"], Some(jobs_root));
+    let job_id = launched["job_id"].as_str().expect("job_id").to_string();
+
+    let parent_root = parent.path().to_str().expect("parent utf-8");
+    let value = run_cmd_with_root(&["status", &job_id], Some(parent_root));
+    assert_envelope(&value, "error", false);
+    assert_eq!(value["error"]["code"], "job_not_found", "{value}");
+    assert_eq!(
+        value["error"]["details"]["root"].as_str(),
+        Some(parent_root),
+        "the reported root must be the selected parent: {value}"
+    );
+    let message = value["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        message.contains(parent_root) && !message.contains(jobs_root),
+        "the parent must be reported without searching children: {message}"
+    );
+}
+
+/// Existing positional-ID behaviour is untouched: exact IDs, unambiguous
+/// prefixes, ambiguity, `--until`, and observation all keep working.
+#[test]
+fn root_reference_preserves_positional_id_and_observation_behaviour() {
+    let h = TestHarness::new();
+
+    let launched = h.run(&[
+        "run",
+        "--until",
+        "0",
+        "sh",
+        "-c",
+        "sleep 0.2; echo positional",
+    ]);
+    let job_id = launched["job_id"].as_str().expect("job_id").to_string();
+
+    let by_id = h.run(&["wait", "--until", "20", &job_id]);
+    assert_envelope(&by_id, "wait", true);
+    assert_eq!(by_id["exit_code"].as_i64(), Some(0), "{by_id}");
+
+    let by_prefix = h.run(&["wait", "--until", "20", &job_id[..8]]);
+    assert_envelope(&by_prefix, "wait", true);
+    assert_eq!(by_prefix["job_id"].as_str(), Some(job_id.as_str()));
+
+    let unknown = h.run(&["wait", "NONEXISTENT_POSITIONAL_ID"]);
+    assert_envelope(&unknown, "error", false);
+    assert_eq!(unknown["error"]["code"], "job_not_found", "{unknown}");
+
+    // An ambiguous prefix stays ambiguous, and is never silently narrowed.
+    for name in ["aa11111111111111", "aa22222222222222"] {
+        let dir = std::path::Path::new(h.root()).join(name);
+        std::fs::create_dir_all(&dir).expect("create job dir");
+        std::fs::write(
+            dir.join("state.json"),
+            serde_json::json!({
+                "status": "exited", "exit_code": 0,
+                "updated_at": "2020-01-01T00:00:00Z", "logs_drained": true
+            })
+            .to_string(),
+        )
+        .expect("write state");
+    }
+    let ambiguous = h.run(&["wait", "aa"]);
+    assert_envelope(&ambiguous, "error", false);
+    assert_eq!(
+        ambiguous["error"]["code"], "ambiguous_job_id",
+        "{ambiguous}"
+    );
+    assert_eq!(
+        ambiguous["error"]["details"]["candidates"]
+            .as_array()
+            .map(Vec::len),
+        Some(2),
+        "{ambiguous}"
+    );
+}
+
+/// A reference works for a job whose root path contains spaces and non-ASCII
+/// characters, and for a root reached through a symlink (Unix `..`/symlink
+/// semantics are preserved, never canonicalized away).
+#[test]
+fn root_reference_supports_unusual_root_paths() {
+    let base = tempfile::tempdir().expect("base dir");
+    let fancy = base.path().join("jobs dir ✓ 日本語");
+    std::fs::create_dir_all(&fancy).expect("create fancy root");
+    let fancy_root = fancy.to_str().expect("fancy root utf-8");
+
+    let launched = run_cmd_with_root(
+        &["run", "--until", "0", "sh", "-c", "echo fancy"],
+        Some(fancy_root),
+    );
+    assert_eq!(launched["root"].as_str(), Some(fancy_root), "{launched}");
+    let waited = run_cmd_with_root_and_stdin(
+        &["wait", "--from-json", "-", "--until", "20"],
+        None,
+        serde_json::to_string(&launched)
+            .expect("serialize")
+            .as_bytes(),
+    );
+    assert_envelope(&waited, "wait", true);
+    assert_eq!(waited["job_id"], launched["job_id"], "{waited}");
+
+    // `..` in a supplied root is kept lexically, not canonicalized.
+    let traversed = format!("{}/ignored/../jobs dir ✓ 日本語", base.path().display());
+    let via_traversal = run_cmd_with_root(&["list"], Some(&traversed));
+    assert_envelope(&via_traversal, "list", true);
+
+    #[cfg(unix)]
+    {
+        let link = base.path().join("link");
+        std::os::unix::fs::symlink(&fancy, &link).expect("create symlink");
+        let link_root = link.to_str().expect("link utf-8");
+        let via_link = run_cmd_with_root(&["run", "--until", "0", "echo", "link"], Some(link_root));
+        assert_eq!(
+            via_link["root"].as_str(),
+            Some(link_root),
+            "a symlinked root must be reported as supplied, not canonicalized: {via_link}"
+        );
+        let waited = run_cmd_with_root_and_stdin(
+            &["wait", "--from-json", "-", "--until", "20"],
+            None,
+            serde_json::to_string(&via_link)
+                .expect("serialize")
+                .as_bytes(),
+        );
+        assert_envelope(&waited, "wait", true);
+    }
+}
+
+/// The checked-in public schema documents the reference contract, and the
+/// documented version tracks the source constant.
+#[test]
+fn root_reference_schema_and_docs_declare_version_0_4() {
+    let schema_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schema/agent-exec.schema.json");
+    let schema: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&schema_path).expect("read schema"))
+            .expect("schema is valid JSON");
+
+    assert_eq!(
+        schema["definitions"]["Envelope"]["properties"]["schema_version"]["const"].as_str(),
+        Some(agent_exec::schema::SCHEMA_VERSION),
+        "the published envelope version must track SCHEMA_VERSION"
+    );
+
+    let run_like = &schema["definitions"]["RunLikeResponse"]["allOf"][1];
+    assert!(
+        run_like["properties"]["root"]["type"] == "string",
+        "the public schema must define the root field: {run_like}"
+    );
+    assert!(
+        !run_like["required"]
+            .as_array()
+            .expect("required list")
+            .iter()
+            .any(|v| v == "root"),
+        "root stays optional at the published compatibility boundary"
+    );
+
+    let details = &schema["definitions"]["ErrorDetail"]["properties"]["details"];
+    assert_eq!(
+        details["type"].as_str(),
+        Some("object"),
+        "error.details must be published: {details}"
+    );
+    for field in ["job_id", "root", "candidates"] {
+        assert!(
+            details["properties"].get(field).is_some(),
+            "error.details must document {field}: {details}"
+        );
+    }
+
+    for (path, label) in [
+        ("README.md", "README"),
+        ("CHANGELOG.md", "changelog"),
+        (
+            "skills/agent-exec/references/completion-events.md",
+            "bundled skill reference",
+        ),
+    ] {
+        let text =
+            std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
+                .unwrap_or_else(|e| panic!("read {label}: {e}"));
+        assert!(
+            text.contains(agent_exec::schema::SCHEMA_VERSION),
+            "{label} must document schema {}",
+            agent_exec::schema::SCHEMA_VERSION
+        );
+    }
+
+    // The `schema` subcommand publishes the same artifact.
+    let published = run_cmd_with_root(&["schema"], None);
+    assert_envelope(&published, "schema", true);
+    assert_eq!(
+        published["schema"]["definitions"]["Envelope"]["properties"]["schema_version"]["const"]
+            .as_str(),
+        Some(agent_exec::schema::SCHEMA_VERSION),
+    );
+}
+
+/// `wait --help` documents the reference input so the contract is discoverable.
+#[test]
+fn root_reference_wait_help_documents_the_reference_input() {
+    let output = Command::new(binary())
+        .args(["wait", "--help"])
+        .output()
+        .expect("wait --help");
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        help.contains("--from-json"),
+        "wait --help must document --from-json: {help}"
+    );
+    assert!(
+        help.contains("root"),
+        "wait --help must explain the root-bound selection: {help}"
+    );
 }

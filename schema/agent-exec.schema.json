@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$comment": "2026-08-22T00:00:00Z",
+  "$comment": "2026-09-27T00:00:00Z",
   "title": "agent-exec CLI response schema",
   "description": "JSON Schema for all stdout responses produced by agent-exec.",
   "definitions": {
@@ -14,7 +14,7 @@
       "properties": {
         "schema_version": {
           "type": "string",
-          "const": "0.3",
+          "const": "0.4",
           "description": "Schema version identifier."
         },
         "ok": {
@@ -46,6 +46,31 @@
         "retryable": {
           "type": "boolean",
           "description": "Whether the caller may retry the same request."
+        },
+        "details": {
+          "type": "object",
+          "description": "Optional (schema 0.4). Machine-readable error context whose keys depend on code. ambiguous_job_id carries candidates/truncated; job_not_found carries the requested job_id plus the searched root, and omits root when the failing lookup did not report one.",
+          "properties": {
+            "job_id": {
+              "type": "string",
+              "description": "The requested job ID or prefix, for job_not_found."
+            },
+            "root": {
+              "type": "string",
+              "description": "Absolute jobs root that was actually searched, for job_not_found. Omitted rather than guessed when unavailable."
+            },
+            "candidates": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Matching job IDs, for ambiguous_job_id."
+            },
+            "truncated": {
+              "type": "boolean",
+              "description": "Whether candidates was truncated, for ambiguous_job_id."
+            }
+          }
         }
       }
     },
@@ -207,6 +232,10 @@
             },
             "job_id": {
               "type": "string"
+            },
+            "root": {
+              "type": "string",
+              "description": "Optional (schema 0.4). Absolute resolved jobs root that owns job_id; together they form a root-bound job reference that `wait --from-json` consumes. Always emitted on a new successful launch, and optional here so clients reading older responses stay compatible. Same-host scope: it names a path on the producing host's filesystem, not a portable URI."
             },
             "state": {
               "type": "string",

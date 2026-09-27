@@ -14,6 +14,8 @@ agent-exec --version
 
 After configuration, ask the agent to start a command with `run`, retain the returned `job_id`, and use `wait` for completion state and bounded output. Use `tail` later for repeated log retrieval. An MCP request deadline or disconnected client does not stop the managed job. Use `kill` only for explicit cancellation.
 
+To hand a job from MCP to the CLI, save the `run` result verbatim and pass it to `agent-exec wait --from-json <FILE|->`. The result carries both `job_id` and the absolute jobs `root` that owns it, so the CLI selects the same job even when its working directory or `AGENT_EXEC_ROOT` differs from the MCP server's. Do not retype the `job_id` into a `wait` whose root you have not verified; the reference exists so that guess is unnecessary.
+
 ## Claude Code
 
 Add the stdio server to the current project's local configuration. Use `--scope user` instead when every project should see it.

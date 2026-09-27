@@ -46,6 +46,8 @@ The exact timing can make `status` report `exited` on a busy machine, but the in
 
 An MCP client gets the same lifecycle through the `run`, `status`, `tail`, and `wait` tools. If the MCP request reaches its deadline, the managed job continues; retain the returned `job_id` and reconnect later.
 
+To reconnect from the CLI instead, save the MCP `run` result and pass it to `agent-exec wait --from-json <FILE|->`: the saved result names the absolute jobs root as well as the ID, so the handoff does not depend on the two surfaces agreeing about the working directory or `AGENT_EXEC_ROOT`.
+
 ## Verify success
 
 The final `wait` object must contain:

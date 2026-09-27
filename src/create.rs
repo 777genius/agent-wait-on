@@ -192,6 +192,7 @@ pub fn execute(opts: CreateOpts) -> Result<()> {
         "create",
         CreateData {
             job_id,
+            root: crate::jobstore::root_reference(&root)?,
             state: "created".to_string(),
             stdout_log_path,
             stderr_log_path,

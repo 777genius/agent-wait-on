@@ -1,96 +1,9 @@
 mod support;
 
-use std::{
-    io::{BufRead, BufReader, Write},
-    process::{Command, Stdio},
-};
+use std::process::Command;
 
 use serde_json::{Value, json};
-use support::{TestHarness, assert_envelope, binary};
-
-struct McpProcess {
-    child: std::process::Child,
-    stdout: BufReader<std::process::ChildStdout>,
-}
-
-impl Drop for McpProcess {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl McpProcess {
-    fn start(root: &str) -> Self {
-        Self::start_with_env(root, &[])
-    }
-
-    fn start_with_env(root: &str, env: &[(&str, &str)]) -> Self {
-        let mut command = Command::new(binary());
-        command
-            .args(["--root", root, "mcp"])
-            .envs(env.iter().copied())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn().expect("spawn MCP server");
-        Self {
-            stdout: BufReader::new(child.stdout.take().expect("stdout")),
-            child,
-        }
-    }
-
-    fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
-        writeln!(
-            self.child.stdin.as_mut().expect("stdin"),
-            "{}",
-            json!({
-                "jsonrpc": "2.0", "id": id, "method": method, "params": params
-            })
-        )
-        .expect("send request");
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).expect("read response");
-        serde_json::from_str(line.trim()).expect("JSON-RPC stdout frame")
-    }
-
-    fn initialize(&mut self) {
-        let response = self.request(
-            1,
-            "initialize",
-            json!({
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": { "name": "integration", "version": "1" }
-            }),
-        );
-        assert_eq!(response["jsonrpc"], "2.0");
-        writeln!(
-            self.child.stdin.as_mut().expect("stdin"),
-            "{}",
-            json!({
-                "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
-            })
-        )
-        .expect("send initialized notification");
-    }
-
-    fn close_stdin(&mut self) {
-        self.child.stdin.take();
-    }
-
-    fn call(&mut self, id: u64, name: &str, arguments: Value) -> Value {
-        let response = self.request(
-            id,
-            "tools/call",
-            json!({ "name": name, "arguments": arguments }),
-        );
-        response["result"]
-            .get("structuredContent")
-            .cloned()
-            .unwrap_or(response["result"].clone())
-    }
-}
+use support::{McpProcess, TestHarness, assert_envelope, binary};
 
 /// Read a job's persisted `meta.json` from an isolated harness root.
 fn job_meta(root: &str, job_id: &str) -> Value {
@@ -501,7 +414,7 @@ fn mcp_reaps_finished_supervisors() {
         "short MCP jobs did not reach terminal state"
     );
 
-    let mcp_pid = mcp.child.id();
+    let mcp_pid = mcp.pid();
     assert!(
         poll_until(Duration::from_millis(500), || zombie_children(mcp_pid)
             .is_empty()),

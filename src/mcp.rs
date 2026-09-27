@@ -300,12 +300,24 @@ fn envelope(result: Result<impl serde::Serialize>) -> Json<Value> {
 }
 
 fn domain_error(error: anyhow::Error) -> ErrorResponse {
+    // Rendered from typed fields: `error.to_string()` shows only the outermost
+    // layer, which for a lookup failure is the searched-root context rather than
+    // the missing ID.
+    if let Some(missing) = error.downcast_ref::<crate::jobstore::JobNotFound>() {
+        return crate::schema::job_not_found_error(
+            missing,
+            error.downcast_ref::<crate::jobstore::SearchedRoot>(),
+        );
+    }
     let message = error.to_string();
     let code = if error
-        .downcast_ref::<crate::jobstore::JobNotFound>()
+        .downcast_ref::<crate::reference::InvalidJobReference>()
         .is_some()
+        || error
+            .downcast_ref::<crate::jobstore::NonUtf8Root>()
+            .is_some()
     {
-        "job_not_found"
+        "invalid_argument"
     } else if error
         .downcast_ref::<crate::jobstore::AmbiguousJobId>()
         .is_some()
@@ -341,7 +353,7 @@ fn domain_error(error: anyhow::Error) -> ErrorResponse {
 
 #[tool_router]
 impl Mcp {
-    #[tool(description = "Start a managed job through the canonical agent-exec lifecycle", output_schema = rmcp::handler::server::tool::cached_schema_for_type::<McpResponseObject>())]
+    #[tool(description = "Start a managed job through the canonical agent-exec lifecycle. The successful response carries both job_id and the absolute jobs root that owns it, so saving the result verbatim gives `agent-exec wait --from-json` a reference that selects the same job from any working directory.", output_schema = rmcp::handler::server::tool::cached_schema_for_type::<McpResponseObject>())]
     fn run(&self, Parameters(params): Parameters<RunParams>) -> Json<Value> {
         if params.command.is_empty() || params.command.iter().any(|value| value.is_empty()) {
             return tool_error("command must be a non-empty argv array");
