@@ -1465,4 +1465,75 @@ mod tests {
         assert_eq!(details["candidates"].as_array().unwrap().len(), 2);
         assert_eq!(details["truncated"], false);
     }
+
+    /// With a searched-root context, both the requested ID and the actual root
+    /// must reach the message *and* `error.details`, so every adapter can render
+    /// the same reference without parsing an `anyhow` chain.
+    #[test]
+    fn root_reference_job_not_found_error_names_the_requested_id_and_searched_root() {
+        let missing = crate::jobstore::JobNotFound("abc123".to_string());
+        let searched = crate::jobstore::SearchedRoot::new(std::path::Path::new("/tmp/jobs-root"));
+        let json = serde_json::to_value(job_not_found_error(&missing, Some(&searched))).unwrap();
+
+        assert_eq!(json["error"]["code"], "job_not_found");
+        assert_eq!(json["error"]["retryable"], false);
+        assert_eq!(json["error"]["details"]["job_id"], "abc123");
+        assert_eq!(json["error"]["details"]["root"], "/tmp/jobs-root");
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("abc123") && message.contains("/tmp/jobs-root"),
+            "message must name the requested ID and the searched root: {message}"
+        );
+    }
+
+    /// An externally constructed root-less `JobNotFound` stays classifiable: the
+    /// root is omitted, never invented.
+    #[test]
+    fn root_reference_job_not_found_error_omits_an_absent_root() {
+        let missing = crate::jobstore::JobNotFound("abc123".to_string());
+        let json = serde_json::to_value(job_not_found_error(&missing, None)).unwrap();
+
+        assert_eq!(json["error"]["code"], "job_not_found");
+        assert_eq!(json["error"]["retryable"], false);
+        assert_eq!(json["error"]["details"]["job_id"], "abc123");
+        assert!(
+            json["error"]["details"].get("root").is_none(),
+            "an absent root must be omitted, not invented: {json}"
+        );
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("abc123"),
+            "message must still name the requested ID: {message}"
+        );
+        assert!(
+            !message.contains("root"),
+            "message must not mention a root it does not have: {message}"
+        );
+    }
+
+    /// A non-UTF-8 root cannot be reopened by a consumer, so it is omitted like
+    /// an absent one rather than lossy-rendered into a false identity.
+    #[cfg(unix)]
+    #[test]
+    fn root_reference_job_not_found_error_omits_a_non_utf8_root() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let raw = std::ffi::OsStr::from_bytes(b"/tmp/jobs-\xff-root");
+        let searched = crate::jobstore::SearchedRoot::new(std::path::Path::new(raw));
+        let missing = crate::jobstore::JobNotFound("abc123".to_string());
+        let json = serde_json::to_value(job_not_found_error(&missing, Some(&searched))).unwrap();
+
+        assert_eq!(json["error"]["code"], "job_not_found");
+        assert_eq!(json["error"]["retryable"], false);
+        assert_eq!(json["error"]["details"]["job_id"], "abc123");
+        assert!(
+            json["error"]["details"].get("root").is_none(),
+            "a non-UTF-8 root must be omitted, not lossy-rendered: {json}"
+        );
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(
+            !message.contains("jobs-"),
+            "message must not carry a lossy root rendering: {message}"
+        );
+    }
 }

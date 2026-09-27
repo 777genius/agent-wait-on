@@ -274,6 +274,39 @@ fn test_exec_returns_job_id() {
     assert_common_fields(&json);
 }
 
+/// The serve launch endpoint is a producer path too: its response must name the
+/// absolute jobs root that owns the returned ID, so the response alone is a
+/// complete root-bound job reference.
+#[test]
+fn root_reference_serve_launch_publishes_the_absolute_root() {
+    let srv = ServeProcess::start();
+    let (status, json) = post_json(&srv.url("/exec"), r#"{"command":["echo","hello"]}"#);
+    assert_eq!(status, 200, "POST /exec failed: {json}");
+    assert_eq!(json["ok"], true);
+
+    let root = json["root"]
+        .as_str()
+        .expect("launch response must publish root");
+    assert!(
+        std::path::Path::new(root).is_absolute(),
+        "published root must be absolute: {json}"
+    );
+    assert_eq!(
+        root,
+        srv.root_path().to_str().expect("utf-8 root"),
+        "published root must be the server's resolved jobs root: {json}"
+    );
+
+    let job_id = json["job_id"].as_str().expect("missing job_id");
+    assert!(
+        std::path::Path::new(root)
+            .join(job_id)
+            .join("meta.json")
+            .exists(),
+        "the published root must own the returned job: {json}"
+    );
+}
+
 #[test]
 fn test_status_tail_wait_kill_accept_prefix_and_return_canonical_id() {
     let srv = ServeProcess::start();

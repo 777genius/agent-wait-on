@@ -715,6 +715,46 @@ fn mcp_preserves_missing_job_domain_errors() {
     assert_eq!(status["error"]["code"], "job_not_found");
 }
 
+/// CLI/MCP diagnostics parity: an MCP lookup failure names the actual searched
+/// root *and* the requested ID in both `error.message` and `error.details`.
+/// MCP renders only the outermost `anyhow` layer, so rendering the chain instead
+/// of the typed fields would drop the requested ID here.
+#[test]
+fn root_reference_mcp_missing_job_reports_the_searched_root_and_requested_id() {
+    let harness = TestHarness::new();
+    let mut mcp = McpProcess::start(harness.root());
+    mcp.initialize();
+
+    for (offset, (tool, arguments)) in [
+        ("status", json!({ "job_id": "deadbeef" })),
+        ("wait", json!({ "job_id": "deadbeef", "until": 1 })),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = mcp.call(3 + offset as u64, tool, arguments);
+        assert_envelope(&response, "error", false);
+        let error = &response["error"];
+        assert_eq!(error["code"], "job_not_found", "{tool}: {response}");
+        assert_eq!(error["retryable"], false, "{tool}: {response}");
+        assert_eq!(error["details"]["job_id"], "deadbeef", "{tool}: {response}");
+        assert_eq!(
+            error["details"]["root"].as_str().unwrap_or(""),
+            harness.root(),
+            "{tool}: details.root must be the server's absolute jobs root: {response}"
+        );
+        let message = error["message"].as_str().expect("error message");
+        assert!(
+            message.contains("deadbeef"),
+            "{tool}: message must name the requested ID: {message}"
+        );
+        assert!(
+            message.contains(harness.root()),
+            "{tool}: message must name the searched root: {message}"
+        );
+    }
+}
+
 /// Read the checked-in public schema so MCP responses can be validated against
 /// the same artifact the `schema` command publishes.
 fn checked_in_schema() -> Value {
