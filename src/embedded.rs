@@ -211,6 +211,10 @@ impl JobError {
                 .downcast_ref::<crate::run::ResultLossNotAcknowledged>()
                 .is_some()
             || err.downcast_ref::<crate::config::ConfigError>().is_some()
+            || err
+                .downcast_ref::<crate::reference::InvalidJobReference>()
+                .is_some()
+            || err.downcast_ref::<crate::jobstore::NonUtf8Root>().is_some()
         {
             (JobErrorKind::InvalidInput, Vec::new())
         } else if err.downcast_ref::<JobIdCollisionExhausted>().is_some()

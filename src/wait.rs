@@ -3,10 +3,13 @@
 //! Polls `state.json` until the job leaves the `running` state or a timeout
 //! is reached.
 
+use std::path::Path;
+
 use anyhow::Result;
 use tracing::debug;
 
 use crate::jobstore::{JobDir, resolve_root};
+use crate::reference::JobReference;
 use crate::schema::{Response, WaitData};
 
 /// Options for the `wait` sub-command.
@@ -59,6 +62,48 @@ pub fn build_wait_data(job_dir: &JobDir, state: &crate::schema::JobState) -> Wai
     }
 }
 
+/// Options for waiting on a root-bound job reference.
+///
+/// Deliberately separate from [`WaitOpts`]: the reference already carries a
+/// resolved absolute root, so there is no root to select and no prefix to
+/// resolve. Both entry points share the same polling implementation.
+#[derive(Debug)]
+pub struct ExactWaitOpts<'a> {
+    /// Exact job directory name; never treated as a prefix.
+    pub job_id: &'a str,
+    /// Absolute jobs root named by the reference. Environment and platform
+    /// default roots are ignored.
+    pub root: &'a Path,
+    pub poll_seconds: u64,
+    pub until_seconds: u64,
+    pub forever: bool,
+}
+
+impl<'a> ExactWaitOpts<'a> {
+    /// Build exact-mode options from a validated reference.
+    pub fn from_reference(
+        reference: &'a JobReference,
+        poll_seconds: u64,
+        until_seconds: u64,
+        forever: bool,
+    ) -> Self {
+        ExactWaitOpts {
+            job_id: &reference.job_id,
+            root: &reference.root,
+            poll_seconds,
+            until_seconds,
+            forever,
+        }
+    }
+}
+
+/// Polling budget shared by both wait entry points.
+struct Budget {
+    poll_seconds: u64,
+    until_seconds: u64,
+    forever: bool,
+}
+
 /// Execute `wait`: poll until done, then emit JSON.
 pub fn execute(opts: WaitOpts) -> Result<()> {
     wait_response(opts)?.print();
@@ -67,28 +112,63 @@ pub fn execute(opts: WaitOpts) -> Result<()> {
 
 pub fn wait_response(opts: WaitOpts) -> Result<Response<WaitData>> {
     let root = resolve_root(opts.root);
+    // Positional-ID semantics: exact match first, then unambiguous prefix.
     let job_dir = JobDir::open(&root, opts.job_id)?;
+    poll_until_terminal(
+        &job_dir,
+        Budget {
+            poll_seconds: opts.poll_seconds,
+            until_seconds: opts.until_seconds,
+            forever: opts.forever,
+        },
+    )
+}
 
-    let poll = std::time::Duration::from_secs(opts.poll_seconds.max(1));
-    let deadline = if opts.forever {
+/// Execute `wait` against a root-bound reference, then emit JSON.
+pub fn execute_exact(opts: ExactWaitOpts) -> Result<()> {
+    exact_wait_response(opts)?.print();
+    Ok(())
+}
+
+/// Wait on exactly `root/<job_id>`.
+///
+/// The exact binding is established by the same open the wait loop then polls —
+/// there is no preflight check followed by a prefix-capable reopen — so the
+/// reference can never resolve to a prefix match, and a job that is absent (or
+/// that disappears) fails instead of rebinding.
+pub fn exact_wait_response(opts: ExactWaitOpts) -> Result<Response<WaitData>> {
+    let job_dir = JobDir::open_exact(opts.root, opts.job_id)?;
+    poll_until_terminal(
+        &job_dir,
+        Budget {
+            poll_seconds: opts.poll_seconds,
+            until_seconds: opts.until_seconds,
+            forever: opts.forever,
+        },
+    )
+}
+
+fn poll_until_terminal(job_dir: &JobDir, budget: Budget) -> Result<Response<WaitData>> {
+    let poll = std::time::Duration::from_secs(budget.poll_seconds.max(1));
+    let deadline = if budget.forever {
         None
     } else {
-        Some(std::time::Instant::now() + std::time::Duration::from_secs(opts.until_seconds))
+        Some(std::time::Instant::now() + std::time::Duration::from_secs(budget.until_seconds))
     };
 
     loop {
         let state = job_dir.read_state()?;
-        debug!(job_id = %opts.job_id, state = ?state.status(), "wait poll");
+        debug!(job_id = %job_dir.job_id, state = ?state.status(), "wait poll");
 
         if !state.status().is_non_terminal() && state.logs_drained {
-            return Ok(Response::new("wait", build_wait_data(&job_dir, &state)));
+            return Ok(Response::new("wait", build_wait_data(job_dir, &state)));
         }
 
         if let Some(dl) = deadline
             && std::time::Instant::now() >= dl
             && state.status().is_non_terminal()
         {
-            let mut data = build_wait_data(&job_dir, &state);
+            let mut data = build_wait_data(job_dir, &state);
             data.exit_code = None;
             return Ok(Response::new("wait", data));
         }

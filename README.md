@@ -188,7 +188,7 @@ The following is an illustrative complete response for a successful terminal job
 
 ```json
 {
-  "schema_version": "0.3",
+  "schema_version": "0.4",
   "ok": true,
   "type": "run",
   "job_id": "7f3a9c1e4b2d8a605e7c9f0134ab6d82",
@@ -498,7 +498,7 @@ The response never includes environment-variable values, stdin content, notifica
 
 ```json
 {
-  "schema_version": "0.3",
+  "schema_version": "0.4",
   "ok": true,
   "type": "status",
   "job_id": "7f3a9c1e4b2d8a605e7c9f0134ab6d82",
@@ -532,9 +532,40 @@ The response includes bounded `stdout` and `stderr` tails, their raw byte ranges
 
 ```bash
 agent-exec wait [--until <SECONDS> | --forever] [--poll <SECONDS>] <JOB_ID>
+agent-exec wait [--until <SECONDS> | --forever] [--poll <SECONDS>] --from-json <FILE|->
 ```
 
 The default client-side deadline is 30 seconds. Every response includes bounded `stdout` and `stderr`, byte ranges and totals, and `utf-8-lossy` encoding; terminal responses also include the exit code. Reaching the deadline does not stop the job. Use `tail` for later or repeated log retrieval, and `run --abandon-job-after` when the intent is to give up on the job rather than to stop waiting for it.
+
+`<JOB_ID>` is an exact ID or an unambiguous prefix, resolved against the jobs root the caller selects. `--from-json` instead consumes a **root-bound job reference**: see [Root-bound job references](#root-bound-job-references).
+
+### Root-bound job references
+
+A successful `run`, `create`, `start`, or `restart` response carries both halves of a job's identity — its `job_id` and the absolute resolved `root` that owns it (schema `0.4`). Saved unchanged, that response is a complete reference, so a job launched through one surface can be observed from another without re-deriving the root:
+
+```bash
+agent-exec run --no-wait -- ./scripts/run-heavy-task.sh > launch.json
+agent-exec wait --from-json launch.json --until 600
+```
+
+An MCP launch result works the same way. Pass the tool result's `structuredContent` object, or the byte-identical text body, on stdin:
+
+```bash
+agent-exec wait --from-json - --until 600 < mcp-launch.json
+```
+
+Selection rules:
+
+- Only `job_id` and `root` are used, and `job_id` is matched **exactly**. No prefix resolution, no fallback to `--root`, `AGENT_EXEC_ROOT`, `XDG_DATA_HOME`, or the platform default. A job missing from the referenced root is a `job_not_found` error naming that root.
+- `--from-json` is mutually exclusive with `<JOB_ID>` and with an explicit `--root` in any flag position; either combination is a usage error (exit code 2).
+- The document must be a JSON object with `ok: true`, a non-empty absolute `root`, and a non-empty `job_id` that is a single path component. Protocol wrappers (JSON-RPC envelopes, `tools/call` results, `content` arrays) are not references. `schema_version` is optional; when present it must be `MAJOR.MINOR` within major version `0`.
+- Input is bounded to 16 MiB. Unknown fields are ignored and never executed. A rejected document is reported as `invalid_argument` (exit code 1) and is never echoed back.
+
+Scope: this is a same-host, same-filesystem handoff. `root` is a path on the producing host, not a portable URI, and the reference assumes the named root's contents and symlink mappings are trusted. It provides no cross-host or malicious-filesystem identity guarantee.
+
+Roots are absolutized against the **caller's** working directory (never a workload's `--cwd`) without canonicalization, so symlinks and `..` keep native platform semantics and a not-yet-existing root remains a valid creation destination. A jobs root whose path is not valid UTF-8 cannot be published as a reference and is rejected as `invalid_argument` rather than lossy-encoded.
+
+Rust API compatibility: `RunData` and `CreateData` gained a `root: String` field. It is `#[serde(default)]`, so older launch JSON still deserializes, but embedded callers that construct either struct with a literal must add the field.
 
 ### `kill`: send a signal
 
@@ -966,7 +997,7 @@ Example payload:
 
 ```json
 {
-  "schema_version": "0.3",
+  "schema_version": "0.4",
   "event_type": "job.finished",
   "job_id": "7f3a9c1e4b2d8a605e7c9f0134ab6d82",
   "state": "exited",
@@ -1057,7 +1088,7 @@ When output-match notification metadata is active, the supervisor evaluates newl
 
 ```json
 {
-  "schema_version": "0.3",
+  "schema_version": "0.4",
   "event_type": "job.output.matched",
   "job_id": "7f3a9c1e4b2d8a605e7c9f0134ab6d82",
   "pattern": "ERROR",

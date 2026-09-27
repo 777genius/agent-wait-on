@@ -18,6 +18,7 @@ pub mod list;
 pub mod mcp;
 pub mod notify;
 pub mod process;
+pub mod reference;
 pub mod restart;
 pub mod run;
 pub mod schema;

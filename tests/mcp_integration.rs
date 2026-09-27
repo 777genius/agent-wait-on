@@ -1,96 +1,9 @@
 mod support;
 
-use std::{
-    io::{BufRead, BufReader, Write},
-    process::{Command, Stdio},
-};
+use std::process::Command;
 
 use serde_json::{Value, json};
-use support::{TestHarness, assert_envelope, binary};
-
-struct McpProcess {
-    child: std::process::Child,
-    stdout: BufReader<std::process::ChildStdout>,
-}
-
-impl Drop for McpProcess {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
-impl McpProcess {
-    fn start(root: &str) -> Self {
-        Self::start_with_env(root, &[])
-    }
-
-    fn start_with_env(root: &str, env: &[(&str, &str)]) -> Self {
-        let mut command = Command::new(binary());
-        command
-            .args(["--root", root, "mcp"])
-            .envs(env.iter().copied())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = command.spawn().expect("spawn MCP server");
-        Self {
-            stdout: BufReader::new(child.stdout.take().expect("stdout")),
-            child,
-        }
-    }
-
-    fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
-        writeln!(
-            self.child.stdin.as_mut().expect("stdin"),
-            "{}",
-            json!({
-                "jsonrpc": "2.0", "id": id, "method": method, "params": params
-            })
-        )
-        .expect("send request");
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).expect("read response");
-        serde_json::from_str(line.trim()).expect("JSON-RPC stdout frame")
-    }
-
-    fn initialize(&mut self) {
-        let response = self.request(
-            1,
-            "initialize",
-            json!({
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": { "name": "integration", "version": "1" }
-            }),
-        );
-        assert_eq!(response["jsonrpc"], "2.0");
-        writeln!(
-            self.child.stdin.as_mut().expect("stdin"),
-            "{}",
-            json!({
-                "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
-            })
-        )
-        .expect("send initialized notification");
-    }
-
-    fn close_stdin(&mut self) {
-        self.child.stdin.take();
-    }
-
-    fn call(&mut self, id: u64, name: &str, arguments: Value) -> Value {
-        let response = self.request(
-            id,
-            "tools/call",
-            json!({ "name": name, "arguments": arguments }),
-        );
-        response["result"]
-            .get("structuredContent")
-            .cloned()
-            .unwrap_or(response["result"].clone())
-    }
-}
+use support::{McpProcess, TestHarness, assert_envelope, binary};
 
 /// Read a job's persisted `meta.json` from an isolated harness root.
 fn job_meta(root: &str, job_id: &str) -> Value {
@@ -501,7 +414,7 @@ fn mcp_reaps_finished_supervisors() {
         "short MCP jobs did not reach terminal state"
     );
 
-    let mcp_pid = mcp.child.id();
+    let mcp_pid = mcp.pid();
     assert!(
         poll_until(Duration::from_millis(500), || zombie_children(mcp_pid)
             .is_empty()),
@@ -800,6 +713,46 @@ fn mcp_preserves_missing_job_domain_errors() {
     let status = mcp.call(3, "status", json!({ "job_id": "missing" }));
     assert_envelope(&status, "error", false);
     assert_eq!(status["error"]["code"], "job_not_found");
+}
+
+/// CLI/MCP diagnostics parity: an MCP lookup failure names the actual searched
+/// root *and* the requested ID in both `error.message` and `error.details`.
+/// MCP renders only the outermost `anyhow` layer, so rendering the chain instead
+/// of the typed fields would drop the requested ID here.
+#[test]
+fn root_reference_mcp_missing_job_reports_the_searched_root_and_requested_id() {
+    let harness = TestHarness::new();
+    let mut mcp = McpProcess::start(harness.root());
+    mcp.initialize();
+
+    for (offset, (tool, arguments)) in [
+        ("status", json!({ "job_id": "deadbeef" })),
+        ("wait", json!({ "job_id": "deadbeef", "until": 1 })),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let response = mcp.call(3 + offset as u64, tool, arguments);
+        assert_envelope(&response, "error", false);
+        let error = &response["error"];
+        assert_eq!(error["code"], "job_not_found", "{tool}: {response}");
+        assert_eq!(error["retryable"], false, "{tool}: {response}");
+        assert_eq!(error["details"]["job_id"], "deadbeef", "{tool}: {response}");
+        assert_eq!(
+            error["details"]["root"].as_str().unwrap_or(""),
+            harness.root(),
+            "{tool}: details.root must be the server's absolute jobs root: {response}"
+        );
+        let message = error["message"].as_str().expect("error message");
+        assert!(
+            message.contains("deadbeef"),
+            "{tool}: message must name the requested ID: {message}"
+        );
+        assert!(
+            message.contains(harness.root()),
+            "{tool}: message must name the searched root: {message}"
+        );
+    }
 }
 
 /// Read the checked-in public schema so MCP responses can be validated against

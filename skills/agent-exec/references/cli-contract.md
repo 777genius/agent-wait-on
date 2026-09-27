@@ -41,7 +41,7 @@ Expect one JSON object on stdout for every successful command:
 
 ```json
 {
-  "schema_version": "0.3",
+  "schema_version": "0.4",
   "ok": true,
   "type": "<command>",
   "...": "command-specific fields"
@@ -50,7 +50,7 @@ Expect one JSON object on stdout for every successful command:
 
 Key success payloads:
 
-- `run`: returns inline output (`stdout`, `stderr`, ranges, total bytes) with default wait budget
+- `run`: returns inline output (`stdout`, `stderr`, ranges, total bytes) with default wait budget, plus the absolute `root` that owns `job_id` (schema `0.4`)
 - `status`: returns `job_id`, `state`, `created_at`, and optional terminal fields, plus schema `0.3` execution diagnostics (`command`, `cwd`, `tags`, `pid`, `process_alive`, `updated_at`, `elapsed_ms`, `duration_ms`, `signal`, `logs_drained`, log paths, and log byte totals)
 - `tail`: returns `stdout`, `stderr`, range fields, truncation flag, and total byte counts
 - `wait`: returns terminal `state` and optional `exit_code`
@@ -64,7 +64,7 @@ Expect this envelope for expected failures:
 
 ```json
 {
-  "schema_version": "0.3",
+  "schema_version": "0.4",
   "ok": false,
   "type": "error",
   "error": {
@@ -74,6 +74,8 @@ Expect this envelope for expected failures:
   }
 }
 ```
+
+`error.details` is an optional object (schema `0.4`) whose keys depend on `code`. `job_not_found` from a repository lookup carries `details.job_id` and `details.root` — the jobs root that was actually searched — and names both in `message`; read the root from there instead of assuming which root was used. `ambiguous_job_id` carries `details.candidates` and `details.truncated`.
 
 Common exit codes:
 
@@ -88,8 +90,16 @@ Common exit codes:
 - `run` waits up to 10 seconds by default and returns inline output; use `--no-wait` only when immediate return is more important than seeing startup output.
 - The inline stdout/stderr payload is only a partial view. Use returned log paths and follow-up commands when you need the full output.
 - Use `wait` when terminal state is required and `tail` for tail-side observation.
+- To observe a job launched elsewhere, save the launch response and pass it to `agent-exec wait --from-json <FILE|->`; see the `wait` notes below. Do not retype the `job_id` into a command whose root you have not verified.
 - Use `--mask KEY` when secrets are present in `--env`; masked values become `***` in output and persisted metadata.
 - `--abandon-job-after <SECONDS>` gives up on the job, terminates it, and may permanently lose unfinished results. It is not an observation deadline; `--until` bounds observation without stopping the job. It requires `--acknowledge-result-loss`, and the default is no limit. The removed `--timeout` spelling always fails with migration guidance and never creates a job.
+
+## `wait` notes
+
+- `agent-exec wait <JOB_ID>` resolves an exact ID or an unambiguous prefix against the jobs root the caller selects.
+- `agent-exec wait --from-json <FILE|->` consumes a saved successful launch result as a root-bound job reference: a CLI response, an MCP `structuredContent` object, or the byte-identical MCP text body. Only `job_id` and `root` are used, the ID is matched exactly with no prefix resolution, and `--root` / `AGENT_EXEC_ROOT` / `XDG_DATA_HOME` / platform defaults are ignored rather than used as fallbacks. This is the reliable way to hand a job from MCP to the CLI when the two disagree about cwd or environment.
+- `--from-json` is mutually exclusive with `<JOB_ID>` and with an explicit `--root` in any position; either combination is a usage error (exit `2`). An invalid, oversized (over 16 MiB), wrapped, or `ok: false` document is rejected as `invalid_argument` with exit `1`, and the rejection never echoes the document.
+- A reference is a same-host, same-filesystem handoff. `root` is a path on the producing host, not a portable URI; do not carry a reference to another machine.
 
 ## `abandon` notes
 

@@ -1,0 +1,15 @@
+# Cargo configuration for local builds.
+#
+# On macOS every link step (including this crate's own build script) runs
+# `cc` through the active developer directory. When `xcode-select` points at
+# an Xcode install whose license has not been accepted, `cc` exits 69 and
+# `cargo build`/`cargo test` fail with "linking with `cc` failed", so the
+# declared `cargo test root_reference` verification cannot run at all. The
+# Command Line Tools ship the same SDK without the license prompt, so select
+# them here by default.
+#
+# `force = false` means an exported `DEVELOPER_DIR` always wins, leaving
+# machines with a working Xcode selection or a toolchain in another location
+# untouched. Linux and Windows toolchains ignore the variable.
+[env]
+DEVELOPER_DIR = { value = "/Library/Developer/CommandLineTools", force = false }

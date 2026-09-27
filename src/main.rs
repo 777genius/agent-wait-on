@@ -11,8 +11,12 @@ use std::ffi::OsString;
 use tracing_subscriber::EnvFilter;
 
 use agent_exec::compress::CompressionMode;
-use agent_exec::jobstore::{AmbiguousJobId, InvalidJobState, JobIdCollisionExhausted, JobNotFound};
+use agent_exec::jobstore::{
+    AmbiguousJobId, InvalidJobState, JobIdCollisionExhausted, JobNotFound, NonUtf8Root,
+    SearchedRoot,
+};
 use agent_exec::mcp::McpStartupConfigError;
+use agent_exec::reference::InvalidJobReference;
 use agent_exec::schema::ErrorResponse;
 use agent_exec::tag::InvalidTag;
 
@@ -455,9 +459,17 @@ enum Command {
         )]
         forever: bool,
 
+        /// Consume a successful launch result JSON as a root-bound job reference.
+        /// FILE is a path; "-" reads standard input. The document's exact job_id
+        /// and absolute root are the only fields used for selection, so the same
+        /// saved MCP or CLI launch result selects the same job from any working
+        /// directory. Mutually exclusive with JOB_ID and with an explicit --root.
+        #[arg(long = "from-json", value_name = "FILE|-", value_hint = ValueHint::FilePath)]
+        from_json: Option<String>,
+
         /// Job ID.
         #[arg(add = ArgValueCompleter::new(agent_exec::completions::complete_waitable_jobs))]
-        job_id: String,
+        job_id: Option<String>,
     },
 
     /// Send a signal to a job.
@@ -784,8 +796,16 @@ fn main() {
                     "truncated": truncated,
                 }))
                 .print();
-        } else if e.downcast_ref::<JobNotFound>().is_some() {
-            ErrorResponse::new("job_not_found", format!("{e:#}"), false).print();
+        } else if let Some(missing) = e.downcast_ref::<JobNotFound>() {
+            // Built from the typed fields rather than the anyhow chain, so CLI and
+            // MCP report the same searched root even though they render chains
+            // differently.
+            agent_exec::schema::job_not_found_error(missing, e.downcast_ref::<SearchedRoot>())
+                .print();
+        } else if e.downcast_ref::<InvalidJobReference>().is_some()
+            || e.downcast_ref::<NonUtf8Root>().is_some()
+        {
+            ErrorResponse::new("invalid_argument", format!("{e:#}"), false).print();
         } else if e.downcast_ref::<InvalidTag>().is_some() {
             ErrorResponse::new("invalid_tag", format!("{e:#}"), false).print();
         } else if e.downcast_ref::<McpStartupConfigError>().is_some() {
@@ -963,6 +983,50 @@ fn require_result_loss_acknowledgement_or_exit(abandon_job_after: u64, acknowled
             )
             .exit();
     }
+}
+
+/// Which job `wait` was asked to observe.
+enum WaitSelector {
+    /// A root-bound reference document (`--from-json FILE|-`).
+    Reference(String),
+    /// A positional job ID or unambiguous prefix, resolved against the selected root.
+    JobId(String),
+}
+
+/// Admit exactly one `wait` selector, or exit 2 with a usage error.
+///
+/// The two selectors are exclusive because they disagree about who owns root
+/// selection: a reference carries its own absolute root, while a positional ID is
+/// resolved against the caller's. An explicit `--root` alongside `--from-json` is
+/// therefore a conflict rather than an override, and is rejected wherever it
+/// appears on the command line. Rejection happens before the reference document
+/// is read, so a conflicting invocation never touches the named file or stdin.
+fn resolve_wait_selector_or_exit(
+    from_json: Option<String>,
+    job_id: Option<String>,
+    root: Option<&str>,
+) -> WaitSelector {
+    match (from_json, job_id) {
+        (Some(_), Some(_)) => usage_error_exit(
+            clap::error::ErrorKind::ArgumentConflict,
+            "the argument '--from-json <FILE|->' cannot be used with '<JOB_ID>'",
+        ),
+        (None, None) => usage_error_exit(
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "wait requires either '<JOB_ID>' or '--from-json <FILE|->'",
+        ),
+        (Some(_), None) if root.is_some() => usage_error_exit(
+            clap::error::ErrorKind::ArgumentConflict,
+            "the argument '--from-json <FILE|->' cannot be used with '--root <PATH>': \
+             a job reference already names its own absolute root",
+        ),
+        (Some(source), None) => WaitSelector::Reference(source),
+        (None, Some(job_id)) => WaitSelector::JobId(job_id),
+    }
+}
+
+fn usage_error_exit(kind: clap::error::ErrorKind, message: &str) -> ! {
+    Cli::command().error(kind, message).exit()
 }
 
 #[derive(Debug)]
@@ -1462,15 +1526,32 @@ fn run(cli: Cli) -> Result<()> {
             poll_seconds,
             until,
             forever,
+            from_json,
             job_id,
         } => {
-            agent_exec::wait::execute(agent_exec::wait::WaitOpts {
-                job_id: &job_id,
-                root: root.as_deref(),
-                poll_seconds,
-                until_seconds: until.unwrap_or(30),
-                forever,
-            })?;
+            let until_seconds = until.unwrap_or(30);
+            match resolve_wait_selector_or_exit(from_json, job_id, root.as_deref()) {
+                WaitSelector::Reference(source) => {
+                    let reference = agent_exec::reference::load(&source)?;
+                    agent_exec::wait::execute_exact(
+                        agent_exec::wait::ExactWaitOpts::from_reference(
+                            &reference,
+                            poll_seconds,
+                            until_seconds,
+                            forever,
+                        ),
+                    )?;
+                }
+                WaitSelector::JobId(job_id) => {
+                    agent_exec::wait::execute(agent_exec::wait::WaitOpts {
+                        job_id: &job_id,
+                        root: root.as_deref(),
+                        poll_seconds,
+                        until_seconds,
+                        forever,
+                    })?;
+                }
+            }
         }
 
         Command::Kill {

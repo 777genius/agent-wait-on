@@ -26,6 +26,77 @@ impl std::fmt::Display for JobNotFound {
 
 impl std::error::Error for JobNotFound {}
 
+/// Typed lookup-scope context attached to every [`JobNotFound`] this module
+/// produces.
+///
+/// Adapters read the searched root from this type instead of parsing an
+/// `anyhow` chain, because the CLI renders the whole chain while MCP renders
+/// only the outermost error. Externally constructed root-less `JobNotFound`
+/// errors stay classifiable: the context is simply absent and adapters omit the
+/// root rather than inventing one.
+#[derive(Debug, Clone)]
+pub struct SearchedRoot {
+    root: PathBuf,
+}
+
+impl SearchedRoot {
+    pub fn new(root: &Path) -> Self {
+        SearchedRoot {
+            root: root.to_path_buf(),
+        }
+    }
+
+    /// The searched root as it was resolved.
+    pub fn path(&self) -> &Path {
+        &self.root
+    }
+
+    /// UTF-8 rendering of the searched root, or `None` when the path is not
+    /// UTF-8. Callers omit the root instead of lossy-rendering an identity.
+    pub fn as_str(&self) -> Option<&str> {
+        self.root.to_str()
+    }
+}
+
+impl std::fmt::Display for SearchedRoot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "while searching jobs root {}", self.root.display())
+    }
+}
+
+/// Build the canonical "job not found" error with its searched-root context.
+fn job_not_found(root: &Path, job_id: &str) -> anyhow::Error {
+    anyhow::Error::new(JobNotFound(job_id.to_string())).context(SearchedRoot::new(root))
+}
+
+/// Sentinel error type for a jobs root that cannot be represented as a job
+/// reference because it is not valid UTF-8.
+///
+/// New root-bound references are rejected rather than lossy-serialized, so a
+/// reference never names a root the consumer cannot reopen.
+#[derive(Debug)]
+pub struct NonUtf8Root(pub PathBuf);
+
+impl std::fmt::Display for NonUtf8Root {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "jobs root is not valid UTF-8 and cannot be published as a job reference: {}",
+            self.0.display()
+        )
+    }
+}
+
+impl std::error::Error for NonUtf8Root {}
+
+/// Render a resolved jobs root as the absolute `root` field of a successful
+/// response, rejecting non-UTF-8 roots.
+pub fn root_reference(root: &Path) -> Result<String> {
+    root.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow::Error::new(NonUtf8Root(root.to_path_buf())))
+}
+
 /// Sentinel error type when a job ID prefix matches multiple job directories.
 /// Used by callers to emit `error.code = "ambiguous_job_id"` instead of `internal_error`.
 #[derive(Debug)]
@@ -119,7 +190,31 @@ pub fn short_job_id(job_id: &str) -> String {
     job_id.chars().take(SHORT_JOB_ID_LENGTH).collect()
 }
 
+/// Resolve the jobs root, absolutized against the caller's current directory.
+///
+/// Selection precedence is unchanged; only the representation is. The selected
+/// value is made absolute with [`std::path::absolute`], which is purely lexical:
+/// it never canonicalizes, never resolves symlinks, and never appends `jobs`, so
+/// native platform semantics (Unix symlink and `..` traversal, Windows
+/// absolute-path rules) are preserved and a missing root stays a valid creation
+/// destination. The same resolved value is used for storage and for the `root`
+/// field of successful responses.
+///
+/// Absolutization is relative to the *caller's* cwd, not a workload's `--cwd`.
 pub fn resolve_root(cli_root: Option<&str>) -> PathBuf {
+    absolutize(select_root(cli_root))
+}
+
+/// Make `path` absolute lexically, falling back to the selected value when the
+/// platform cannot answer (for example when the process has no readable cwd).
+fn absolutize(path: PathBuf) -> PathBuf {
+    if path.is_absolute() {
+        return path;
+    }
+    std::path::absolute(&path).unwrap_or(path)
+}
+
+fn select_root(cli_root: Option<&str>) -> PathBuf {
     // 1. CLI flag
     if let Some(root) = cli_root {
         return PathBuf::from(root);
@@ -198,6 +293,23 @@ impl JobDir {
         Self::resolve_matching(root, job_id, |_| true)
     }
 
+    /// Open `root/<job_id>` and nothing else.
+    ///
+    /// Unlike [`JobDir::open`] this never scans and never resolves a prefix, so a
+    /// job reference that names a specific root and ID binds to exactly that
+    /// directory or fails. Used by the root-bound reference consumer, where
+    /// falling back to a prefix match would silently observe a different job.
+    pub fn open_exact(root: &std::path::Path, job_id: &str) -> Result<Self> {
+        let path = root.join(job_id);
+        if path.is_dir() {
+            return Ok(JobDir {
+                path,
+                job_id: job_id.to_string(),
+            });
+        }
+        Err(job_not_found(root, job_id))
+    }
+
     /// Open an existing job directory by ID or unambiguous prefix, restricted to
     /// jobs whose persisted state matches `predicate`.
     pub fn open_matching<F>(root: &std::path::Path, job_id: &str, predicate: F) -> Result<Self>
@@ -223,7 +335,7 @@ impl JobDir {
             if predicate(&job_dir) {
                 return Ok(job_dir);
             }
-            return Err(anyhow::Error::new(JobNotFound(job_id.to_string())));
+            return Err(job_not_found(root, job_id));
         }
 
         let mut candidates: Vec<String> = std::fs::read_dir(root)
@@ -248,7 +360,7 @@ impl JobDir {
             .collect();
 
         match candidates.len() {
-            0 => Err(anyhow::Error::new(JobNotFound(job_id.to_string()))),
+            0 => Err(job_not_found(root, job_id)),
             1 => {
                 let resolved = candidates.remove(0);
                 let path = root.join(&resolved);

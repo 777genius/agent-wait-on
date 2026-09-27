@@ -2,7 +2,7 @@
 //!
 //! Stdout output is JSON by default; YAML when --yaml is set.
 //! Tracing logs go to stderr.
-//! Schema version is fixed at "0.3".
+//! Schema version is fixed at "0.4".
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,7 @@ pub fn set_yaml_output(yaml: bool) {
     YAML_OUTPUT.store(yaml, Ordering::Relaxed);
 }
 
-pub const SCHEMA_VERSION: &str = "0.3";
+pub const SCHEMA_VERSION: &str = "0.4";
 
 /// Serialize `value` and print to stdout in the selected format (JSON default, YAML with --yaml).
 ///
@@ -114,12 +114,47 @@ impl ErrorResponse {
     }
 }
 
+/// Build the canonical `job_not_found` error from typed lookup facts.
+///
+/// Every adapter renders the same message and `error.details`, because each one
+/// formats `anyhow` chains differently: the CLI prints the whole chain while MCP
+/// prints only the outermost error. The searched root is omitted — never invented
+/// — when the lookup context is absent (an externally constructed
+/// [`crate::jobstore::JobNotFound`]) or is not UTF-8. `code`, `retryable`, and the
+/// resulting exit status are unchanged.
+pub fn job_not_found_error(
+    missing: &crate::jobstore::JobNotFound,
+    searched: Option<&crate::jobstore::SearchedRoot>,
+) -> ErrorResponse {
+    let job_id = missing.0.as_str();
+    let root = searched.and_then(|s| s.as_str());
+    let message = match root {
+        Some(root) => format!("job not found: {job_id} (searched root: {root})"),
+        None => format!("job not found: {job_id}"),
+    };
+    let mut details = serde_json::Map::new();
+    details.insert("job_id".to_string(), serde_json::json!(job_id));
+    if let Some(root) = root {
+        details.insert("root".to_string(), serde_json::json!(root));
+    }
+    ErrorResponse::new("job_not_found", message, false)
+        .with_details(serde_json::Value::Object(details))
+}
+
 // ---------- Command-specific response payloads ----------
 
 /// Response for `create` command.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateData {
     pub job_id: String,
+    /// Absolute resolved jobs root that owns `job_id` (schema `0.4`).
+    ///
+    /// Always emitted on a successful launch so the response is a complete,
+    /// root-bound job reference. `serde(default)` keeps older launch JSON
+    /// deserializable; Rust callers that build this struct with a literal must
+    /// add the field.
+    #[serde(default)]
+    pub root: String,
     /// Always "created".
     pub state: String,
     /// Absolute path to stdout.log for this job.
@@ -203,6 +238,14 @@ impl NotificationStatus {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RunData {
     pub job_id: String,
+    /// Absolute resolved jobs root that owns `job_id` (schema `0.4`).
+    ///
+    /// Always emitted on a successful launch so the response is a complete,
+    /// root-bound job reference. `serde(default)` keeps older launch JSON
+    /// deserializable; Rust callers that build this struct with a literal must
+    /// add the field.
+    #[serde(default)]
+    pub root: String,
     pub state: String,
     /// Tags assigned to this job (always present; empty array when none).
     #[serde(default)]
@@ -1122,6 +1165,7 @@ mod tests {
     ) -> RunData {
         RunData {
             job_id: "abc123".into(),
+            root: "/tmp/jobs".into(),
             state: "exited".into(),
             tags: vec![],
             env_vars: vec![],
@@ -1420,5 +1464,76 @@ mod tests {
         assert!(!details.is_null(), "details must be present: {json}");
         assert_eq!(details["candidates"].as_array().unwrap().len(), 2);
         assert_eq!(details["truncated"], false);
+    }
+
+    /// With a searched-root context, both the requested ID and the actual root
+    /// must reach the message *and* `error.details`, so every adapter can render
+    /// the same reference without parsing an `anyhow` chain.
+    #[test]
+    fn root_reference_job_not_found_error_names_the_requested_id_and_searched_root() {
+        let missing = crate::jobstore::JobNotFound("abc123".to_string());
+        let searched = crate::jobstore::SearchedRoot::new(std::path::Path::new("/tmp/jobs-root"));
+        let json = serde_json::to_value(job_not_found_error(&missing, Some(&searched))).unwrap();
+
+        assert_eq!(json["error"]["code"], "job_not_found");
+        assert_eq!(json["error"]["retryable"], false);
+        assert_eq!(json["error"]["details"]["job_id"], "abc123");
+        assert_eq!(json["error"]["details"]["root"], "/tmp/jobs-root");
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("abc123") && message.contains("/tmp/jobs-root"),
+            "message must name the requested ID and the searched root: {message}"
+        );
+    }
+
+    /// An externally constructed root-less `JobNotFound` stays classifiable: the
+    /// root is omitted, never invented.
+    #[test]
+    fn root_reference_job_not_found_error_omits_an_absent_root() {
+        let missing = crate::jobstore::JobNotFound("abc123".to_string());
+        let json = serde_json::to_value(job_not_found_error(&missing, None)).unwrap();
+
+        assert_eq!(json["error"]["code"], "job_not_found");
+        assert_eq!(json["error"]["retryable"], false);
+        assert_eq!(json["error"]["details"]["job_id"], "abc123");
+        assert!(
+            json["error"]["details"].get("root").is_none(),
+            "an absent root must be omitted, not invented: {json}"
+        );
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(
+            message.contains("abc123"),
+            "message must still name the requested ID: {message}"
+        );
+        assert!(
+            !message.contains("root"),
+            "message must not mention a root it does not have: {message}"
+        );
+    }
+
+    /// A non-UTF-8 root cannot be reopened by a consumer, so it is omitted like
+    /// an absent one rather than lossy-rendered into a false identity.
+    #[cfg(unix)]
+    #[test]
+    fn root_reference_job_not_found_error_omits_a_non_utf8_root() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let raw = std::ffi::OsStr::from_bytes(b"/tmp/jobs-\xff-root");
+        let searched = crate::jobstore::SearchedRoot::new(std::path::Path::new(raw));
+        let missing = crate::jobstore::JobNotFound("abc123".to_string());
+        let json = serde_json::to_value(job_not_found_error(&missing, Some(&searched))).unwrap();
+
+        assert_eq!(json["error"]["code"], "job_not_found");
+        assert_eq!(json["error"]["retryable"], false);
+        assert_eq!(json["error"]["details"]["job_id"], "abc123");
+        assert!(
+            json["error"]["details"].get("root").is_none(),
+            "a non-UTF-8 root must be omitted, not lossy-rendered: {json}"
+        );
+        let message = json["error"]["message"].as_str().expect("message");
+        assert!(
+            !message.contains("jobs-"),
+            "message must not carry a lossy root rendering: {message}"
+        );
     }
 }

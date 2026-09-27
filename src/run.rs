@@ -1151,6 +1151,7 @@ pub fn run_response(opts: RunOpts) -> Result<Response<RunData>> {
         "run",
         RunData {
             job_id,
+            root: crate::jobstore::root_reference(&root)?,
             state: observation.state,
             tags,
             // Include masked env_vars in the JSON response so callers can inspect

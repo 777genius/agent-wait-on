@@ -170,6 +170,7 @@ pub fn execute(opts: RestartOpts) -> Result<()> {
         "restart",
         RunData {
             job_id: job_dir.job_id.clone(),
+            root: crate::jobstore::root_reference(&root)?,
             state: observation.state,
             tags: meta.tags.clone(),
             env_vars: masked_env_vars,

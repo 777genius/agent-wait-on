@@ -210,8 +210,18 @@ fn err_resp(status: StatusCode, code: &str, message: &str) -> AxumResponse {
 }
 
 fn map_err_to_response(e: anyhow::Error) -> AxumResponse {
-    if e.downcast_ref::<JobNotFound>().is_some() {
-        err_resp(StatusCode::NOT_FOUND, "job_not_found", &format!("{e:#}"))
+    if let Some(missing) = e.downcast_ref::<JobNotFound>() {
+        // Same typed rendering as the CLI and MCP adapters; only the HTTP status
+        // classification is served-specific.
+        let response = crate::schema::job_not_found_error(
+            missing,
+            e.downcast_ref::<crate::jobstore::SearchedRoot>(),
+        );
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::to_value(&response).expect("error serialization")),
+        )
+            .into_response()
     } else if let Some(amb) = e.downcast_ref::<crate::jobstore::AmbiguousJobId>() {
         let truncated = amb.candidates.len() > 20;
         let candidates: Vec<&str> = amb.candidates.iter().take(20).map(|s| s.as_str()).collect();
@@ -513,6 +523,7 @@ fn run_exec_inner(p: ExecParams) -> Result<serde_json::Value> {
         "run",
         RunData {
             job_id,
+            root: crate::jobstore::root_reference(&resolved_root)?,
             state: observation.state,
             tags: vec![],
             env_vars: vec![],

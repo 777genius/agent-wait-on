@@ -1,7 +1,127 @@
 #![allow(dead_code)]
 
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
+
+use serde_json::{Value, json};
+
+/// A live `agent-exec mcp` server driven over the stdio JSON-RPC transport.
+///
+/// Shared by the MCP suite and by the root-bound reference handoff tests, which
+/// need a real MCP launch result rather than a hand-written fixture.
+pub struct McpProcess {
+    child: std::process::Child,
+    stdout: BufReader<std::process::ChildStdout>,
+}
+
+impl Drop for McpProcess {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl McpProcess {
+    pub fn start(root: &str) -> Self {
+        Self::start_with_env(root, &[])
+    }
+
+    pub fn start_with_env(root: &str, env: &[(&str, &str)]) -> Self {
+        let mut command = Command::new(binary());
+        command
+            .args(["--root", root, "mcp"])
+            .envs(env.iter().copied())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn MCP server");
+        Self {
+            stdout: BufReader::new(child.stdout.take().expect("stdout")),
+            child,
+        }
+    }
+
+    pub fn request(&mut self, id: u64, method: &str, params: Value) -> Value {
+        writeln!(
+            self.child.stdin.as_mut().expect("stdin"),
+            "{}",
+            json!({
+                "jsonrpc": "2.0", "id": id, "method": method, "params": params
+            })
+        )
+        .expect("send request");
+        let mut line = String::new();
+        self.stdout.read_line(&mut line).expect("read response");
+        serde_json::from_str(line.trim()).expect("JSON-RPC stdout frame")
+    }
+
+    pub fn initialize(&mut self) {
+        let response = self.request(
+            1,
+            "initialize",
+            json!({
+                "protocolVersion": "2025-03-26",
+                "capabilities": {},
+                "clientInfo": { "name": "integration", "version": "1" }
+            }),
+        );
+        assert_eq!(response["jsonrpc"], "2.0");
+        writeln!(
+            self.child.stdin.as_mut().expect("stdin"),
+            "{}",
+            json!({
+                "jsonrpc": "2.0", "method": "notifications/initialized", "params": {}
+            })
+        )
+        .expect("send initialized notification");
+    }
+
+    pub fn close_stdin(&mut self) {
+        self.child.stdin.take();
+    }
+
+    /// PID of the server process, for supervisor-reaping assertions.
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Call a tool and return its `structuredContent` result object.
+    pub fn call(&mut self, id: u64, name: &str, arguments: Value) -> Value {
+        let response = self.request(
+            id,
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        );
+        response["result"]
+            .get("structuredContent")
+            .cloned()
+            .unwrap_or(response["result"].clone())
+    }
+
+    /// Call a tool and return both the `structuredContent` object and the
+    /// serialized text body, which the reference contract requires to be
+    /// interchangeable inputs.
+    pub fn call_with_text(&mut self, id: u64, name: &str, arguments: Value) -> (Value, String) {
+        let response = self.request(
+            id,
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        );
+        let result = response["result"].clone();
+        let structured = result
+            .get("structuredContent")
+            .cloned()
+            .unwrap_or_else(|| result.clone());
+        let text = result["content"][0]["text"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                serde_json::to_string(&structured).expect("serialize structured content")
+            });
+        (structured, text)
+    }
+}
 
 /// Path to the compiled binary.
 pub fn binary() -> PathBuf {
@@ -200,7 +320,7 @@ pub fn run_cmd_with_subcommand_root_flag(
 pub fn assert_envelope(v: &serde_json::Value, expected_type: &str, expected_ok: bool) {
     assert_eq!(
         v["schema_version"].as_str().unwrap_or(""),
-        "0.3",
+        "0.4",
         "schema_version mismatch: {v}"
     );
     assert_eq!(

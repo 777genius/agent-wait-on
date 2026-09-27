@@ -5,6 +5,58 @@ Versioned history of the `schema_version` stdout JSON contract.
 Backward-compatible additions (optional fields, new enum variants) bump MINOR.
 Removals, type changes, meaning changes, and newly required fields bump MAJOR.
 
+## schema 0.4
+
+- Added optional `root` to every successful launch response (`run`, `create`,
+  `start`, `restart`, and the `serve` launch endpoint). It is the absolute
+  resolved jobs root that owns `job_id`, so the response alone is a complete
+  root-bound job reference. Always emitted on a new successful launch, and
+  optional at the published compatibility boundary so clients reading older
+  responses keep working.
+- Added `agent-exec wait --from-json <FILE|->`, which consumes a saved successful
+  launch result — a CLI response, an MCP `structuredContent` object, or the
+  byte-identical MCP text body — and observes exactly the `job_id` inside the
+  document's `root`. Selection uses only those two fields: the ID is matched
+  exactly with no prefix resolution, and `--root`, `AGENT_EXEC_ROOT`,
+  `XDG_DATA_HOME`, and platform defaults are ignored rather than used as
+  fallbacks. Positional `<JOB_ID>` semantics, including prefix resolution, are
+  unchanged.
+- `--from-json` is mutually exclusive with `<JOB_ID>` and with an explicit
+  `--root` in any flag position; either combination is a usage error (exit code
+  2) that is rejected before the document is read. A document that is oversized
+  (over 16 MiB), malformed, not a JSON object, missing `ok: true`, missing a
+  non-empty absolute `root` or `job_id`, carrying an unsafe `job_id` (NUL, `/`,
+  `\`, `:`, `.`, `..`, or more than one path component), or declaring a
+  `schema_version` outside decimal `0.MINOR` is rejected with the new
+  `invalid_argument` error code, `retryable=false`, and exit code 1. Unknown
+  fields are ignored and never executed, and rejections never echo the document.
+  Protocol wrappers (JSON-RPC envelopes, `tools/call` results, `content` arrays)
+  are not references.
+- Added optional `error.details` to the published schema. `job_not_found` from a
+  repository lookup now carries `details.job_id` and `details.root` — the root
+  that was actually searched — and names both in `error.message`. The root is
+  omitted rather than guessed when the failing lookup did not report one.
+  `ambiguous_job_id` continues to carry `details.candidates` and
+  `details.truncated`. Error codes, retryability, HTTP status classification, and
+  CLI exit codes are unchanged.
+- The jobs root is now absolutized against the caller's working directory (never
+  a workload's `--cwd`) before it is used for storage or published in a response.
+  Selection precedence is unchanged, and absolutization is purely lexical: no
+  canonicalization, no symlink resolution, and no appended `jobs` segment, so
+  native platform semantics are preserved and a missing root stays a valid
+  creation destination. `meta.root` and `list`/`gc` output become absolute
+  through the same shared resolution. A jobs root whose path is not valid UTF-8
+  is rejected as `invalid_argument` rather than lossy-encoded into a reference.
+- Rust API: `RunData` and `CreateData` gained `root: String`. Both are
+  `#[serde(default)]`, so older launch JSON still deserializes, but embedded
+  callers that build either struct with a struct literal must add the field.
+- Scope: a root-bound reference is a same-host, same-filesystem handoff. `root`
+  names a path on the producing host and is not a portable URI; the reference
+  assumes the named root's contents and symlink mappings are trusted, and offers
+  no cross-host or malicious-filesystem identity guarantee.
+- Because `schema_version` is a global contract version, completion and
+  output-match event envelopes also carry `0.4` with no field-shape changes.
+
 ## schema 0.3
 
 - A running job's abandonment deadline is no longer fixed at launch. Added
