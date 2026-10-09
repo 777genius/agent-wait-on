@@ -188,7 +188,7 @@ The following is an illustrative complete response for a successful terminal job
 
 ```json
 {
-  "schema_version": "0.4",
+  "schema_version": "0.5",
   "ok": true,
   "type": "run",
   "job_id": "7f3a9c1e4b2d8a605e7c9f0134ab6d82",
@@ -498,7 +498,7 @@ The response never includes environment-variable values, stdin content, notifica
 
 ```json
 {
-  "schema_version": "0.4",
+  "schema_version": "0.5",
   "ok": true,
   "type": "status",
   "job_id": "7f3a9c1e4b2d8a605e7c9f0134ab6d82",
@@ -538,6 +538,32 @@ agent-exec wait [--until <SECONDS> | --forever] [--poll <SECONDS>] --from-json <
 The default client-side deadline is 30 seconds. Every response includes bounded `stdout` and `stderr`, byte ranges and totals, and `utf-8-lossy` encoding; terminal responses also include the exit code. Reaching the deadline does not stop the job. Use `tail` for later or repeated log retrieval, and `run --abandon-job-after` when the intent is to give up on the job rather than to stop waiting for it.
 
 `<JOB_ID>` is an exact ID or an unambiguous prefix, resolved against the jobs root the caller selects. `--from-json` instead consumes a **root-bound job reference**: see [Root-bound job references](#root-bound-job-references).
+
+#### Stale running state: `job_observation_inconsistent`
+
+On Unix, `wait` also probes the PID recorded for a `running` job with a signal-0 existence check. If saved state keeps saying `running` while that PID is explicitly absent (`ESRCH`) for at least three consecutive polls spanning at least 10 seconds, and a final re-read still shows the same running job with the PID absent, `wait` stops with a retryable error instead of blocking forever (exit code 1):
+
+```json
+{
+  "schema_version": "0.5",
+  "ok": false,
+  "type": "error",
+  "error": {
+    "code": "job_observation_inconsistent",
+    "message": "wait could not reconcile process observation with saved job state: ...",
+    "retryable": true,
+    "details": {
+      "job_id": "<full id>",
+      "root": "/absolute/jobs/root",
+      "state": "running",
+      "pid": 12345,
+      "process_observation": "absent"
+    }
+  }
+}
+```
+
+This is a wait observation failure, not a job result. `wait` never writes job files and never signals the workload, and the error carries no exit code, signal, or finish time. A result saved later is still returned by a fresh `status` or `wait`. Permission errors, unexpected errno values, missing or invalid PIDs, a PID reused by another process, and non-Unix platforms never count as absence. A finite `--until` deadline still wins, and a terminal state still waits for log drain as before. The waiter must share the supervisor's host and PID namespace: a jobs root shared from another host or container can probe a live workload as absent and produce this error.
 
 ### Root-bound job references
 
@@ -768,7 +794,7 @@ Keep the default loopback bind unless remote access is required. For non-loopbac
 | `POST` | `/exec` | `run` | Starts a job and returns `RunData`. |
 | `GET` | `/status/{id}` | `status` | Returns job status. |
 | `GET` | `/tail/{id}` | `tail` | Returns bounded `stdout` and `stderr` tails. |
-| `GET` | `/wait/{id}` | `wait --forever` | Blocks until a terminal state and returns bounded stdout/stderr output metadata. |
+| `GET` | `/wait/{id}` | `wait --forever` | Blocks until a terminal state and returns bounded stdout/stderr output metadata. Returns HTTP 409 with `job_observation_inconsistent` when saved running state conflicts with process observation. |
 | `POST` | `/kill/{id}` | `kill` | Sends `TERM`; `?no_wait=true` skips observation. |
 | `PUT` | `/abandon/{id}` | `abandon set` | Replaces a running job's abandonment deadline. |
 | `DELETE` | `/abandon/{id}` | `abandon clear` | Removes a running job's abandonment deadline. |
@@ -997,7 +1023,7 @@ Example payload:
 
 ```json
 {
-  "schema_version": "0.4",
+  "schema_version": "0.5",
   "event_type": "job.finished",
   "job_id": "7f3a9c1e4b2d8a605e7c9f0134ab6d82",
   "state": "exited",
@@ -1088,7 +1114,7 @@ When output-match notification metadata is active, the supervisor evaluates newl
 
 ```json
 {
-  "schema_version": "0.4",
+  "schema_version": "0.5",
   "event_type": "job.output.matched",
   "job_id": "7f3a9c1e4b2d8a605e7c9f0134ab6d82",
   "pattern": "ERROR",

@@ -802,6 +802,10 @@ fn main() {
             // differently.
             agent_exec::schema::job_not_found_error(missing, e.downcast_ref::<SearchedRoot>())
                 .print();
+        } else if let Some(inconsistent) =
+            e.downcast_ref::<agent_exec::wait::JobObservationInconsistent>()
+        {
+            inconsistent.error_response().print();
         } else if e.downcast_ref::<InvalidJobReference>().is_some()
             || e.downcast_ref::<NonUtf8Root>().is_some()
         {

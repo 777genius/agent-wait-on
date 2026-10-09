@@ -1,4 +1,11 @@
-## MODIFIED Requirements
+## REMOVED Requirements
+
+### Requirement: wait サブコマンドの待機期限オプション
+
+**Reason**: Canonical agent-exec-run carries three duplicate copies of this requirement; removing every copy lets the consolidated requirement below be promoted exactly once.
+**Migration**: The ADDED requirement of the same name re-adds the complete consolidated normative text and scenario union (deadline/poll, progress hints and stale running observation); no behavior is dropped.
+
+## ADDED Requirements
 
 ### Requirement: wait サブコマンドの待機期限オプション
 

@@ -222,6 +222,13 @@ fn map_err_to_response(e: anyhow::Error) -> AxumResponse {
             Json(serde_json::to_value(&response).expect("error serialization")),
         )
             .into_response()
+    } else if let Some(inconsistent) = e.downcast_ref::<crate::wait::JobObservationInconsistent>() {
+        // Saved state conflicts with process observation; retryable, not a job outcome.
+        (
+            StatusCode::CONFLICT,
+            Json(serde_json::to_value(inconsistent.error_response()).expect("error serialization")),
+        )
+            .into_response()
     } else if let Some(amb) = e.downcast_ref::<crate::jobstore::AmbiguousJobId>() {
         let truncated = amb.candidates.len() > 20;
         let candidates: Vec<&str> = amb.candidates.iter().take(20).map(|s| s.as_str()).collect();

@@ -1123,7 +1123,7 @@ fn state_json_required_fields_present_with_null_for_options() {
 #[test]
 fn all_commands_use_schema_version_0_2() {
     // Already verified individually above; this test documents the invariant.
-    assert_eq!(agent_exec::schema::SCHEMA_VERSION, "0.4");
+    assert_eq!(agent_exec::schema::SCHEMA_VERSION, "0.5");
 }
 
 // ── contract v0.1: retryable field ─────────────────────────────────────────────

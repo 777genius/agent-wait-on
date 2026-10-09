@@ -309,6 +309,9 @@ fn domain_error(error: anyhow::Error) -> ErrorResponse {
             error.downcast_ref::<crate::jobstore::SearchedRoot>(),
         );
     }
+    if let Some(inconsistent) = error.downcast_ref::<wait::JobObservationInconsistent>() {
+        return inconsistent.error_response();
+    }
     let message = error.to_string();
     let code = if error
         .downcast_ref::<crate::reference::InvalidJobReference>()
