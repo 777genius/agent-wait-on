@@ -2,7 +2,7 @@
 //!
 //! Stdout output is JSON by default; YAML when --yaml is set.
 //! Tracing logs go to stderr.
-//! Schema version is fixed at "0.4".
+//! Schema version is fixed at "0.5".
 
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,7 +15,7 @@ pub fn set_yaml_output(yaml: bool) {
     YAML_OUTPUT.store(yaml, Ordering::Relaxed);
 }
 
-pub const SCHEMA_VERSION: &str = "0.4";
+pub const SCHEMA_VERSION: &str = "0.5";
 
 /// Serialize `value` and print to stdout in the selected format (JSON default, YAML with --yaml).
 ///

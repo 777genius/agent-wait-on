@@ -41,7 +41,7 @@ Expect one JSON object on stdout for every successful command:
 
 ```json
 {
-  "schema_version": "0.4",
+  "schema_version": "0.5",
   "ok": true,
   "type": "<command>",
   "...": "command-specific fields"
@@ -64,7 +64,7 @@ Expect this envelope for expected failures:
 
 ```json
 {
-  "schema_version": "0.4",
+  "schema_version": "0.5",
   "ok": false,
   "type": "error",
   "error": {
@@ -76,6 +76,8 @@ Expect this envelope for expected failures:
 ```
 
 `error.details` is an optional object (schema `0.4`) whose keys depend on `code`. `job_not_found` from a repository lookup carries `details.job_id` and `details.root` — the jobs root that was actually searched — and names both in `message`; read the root from there instead of assuming which root was used. `ambiguous_job_id` carries `details.candidates` and `details.truncated`.
+
+`job_observation_inconsistent` (schema `0.5`, `retryable: true`) is a `wait` observation failure, not a job failure: saved state says `running` but the recorded PID was explicitly absent for at least three polls over at least 10 seconds and again at a final re-read. `details` carries `job_id`, the absolute `root`, `state: "running"`, `pid`, and `process_observation: "absent"`; there is never an exit code, signal, or finish time. The CLI exits `1`, MCP `wait` returns this envelope, and HTTP `GET /wait/{id}` answers `409`. Nothing is written or signaled, so query `status` or `wait` again later to retrieve any result that is saved afterward.
 
 Common exit codes:
 
@@ -100,6 +102,7 @@ Common exit codes:
 - `agent-exec wait --from-json <FILE|->` consumes a saved successful launch result as a root-bound job reference: a CLI response, an MCP `structuredContent` object, or the byte-identical MCP text body. Only `job_id` and `root` are used, the ID is matched exactly with no prefix resolution, and `--root` / `AGENT_EXEC_ROOT` / `XDG_DATA_HOME` / platform defaults are ignored rather than used as fallbacks. This is the reliable way to hand a job from MCP to the CLI when the two disagree about cwd or environment.
 - `--from-json` is mutually exclusive with `<JOB_ID>` and with an explicit `--root` in any position; either combination is a usage error (exit `2`). An invalid, oversized (over 16 MiB), wrapped, or `ok: false` document is rejected as `invalid_argument` with exit `1`, and the rejection never echoes the document.
 - A reference is a same-host, same-filesystem handoff. `root` is a path on the producing host, not a portable URI; do not carry a reference to another machine.
+- On Unix, `wait` (CLI, `--from-json`, MCP and HTTP) ends with `job_observation_inconsistent` when saved `running` state conflicts with sustained explicit absence of the recorded PID. A finite `--until` still wins, a terminal state still waits for log drain, and permission errors, invalid PIDs, PID reuse and non-Unix never count as absence. The waiter must share the supervisor's host and PID namespace; a jobs root shared from another host or container can report a live job this way.
 
 ## `abandon` notes
 

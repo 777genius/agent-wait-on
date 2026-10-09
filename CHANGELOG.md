@@ -5,6 +5,26 @@ Versioned history of the `schema_version` stdout JSON contract.
 Backward-compatible additions (optional fields, new enum variants) bump MINOR.
 Removals, type changes, meaning changes, and newly required fields bump MAJOR.
 
+## schema 0.5
+
+- Added the `job_observation_inconsistent` error code for `wait` on every
+  surface (positional and `--from-json` CLI, MCP `wait`, HTTP `GET /wait/{id}`).
+  On Unix, when saved state is `running` with a recorded PID and a signal-0
+  probe reports that PID explicitly absent (`ESRCH`) for at least three
+  consecutive polls spanning at least 10 seconds, and a final re-read still
+  shows the same `(pid, started_at)` running and absent, `wait` returns this
+  error instead of blocking indefinitely. `retryable` is `true` and
+  `error.details` carries `job_id`, the absolute `root`, `state: "running"`,
+  `pid`, and `process_observation: "absent"`. The CLI exits 1, MCP returns the
+  domain envelope, and HTTP answers 409 Conflict.
+- This is an observation failure, not a job outcome: `wait` writes no job file,
+  sends no termination signal, and reports no exit code, signal, or finish time.
+  A terminal result saved later is still returned by a fresh `status` or `wait`.
+- Permission errors, other errno values, `pid: null`, invalid PIDs, PID reuse
+  that probes present, and non-Unix platforms never count as absence. A finite
+  `--until` deadline still wins, and a terminal state with undrained logs keeps
+  waiting for drain. Existing fields and error codes keep their meaning.
+
 ## schema 0.4
 
 - Added optional `root` to every successful launch response (`run`, `create`,

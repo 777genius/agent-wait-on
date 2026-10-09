@@ -6,7 +6,7 @@ When notification sinks are configured, expect a `job.finished` payload after th
 
 ```json
 {
-  "schema_version": "0.4",
+  "schema_version": "0.5",
   "event_type": "job.finished",
   "job_id": "01J...",
   "state": "exited",
@@ -33,7 +33,7 @@ If the job is killed by a signal, expect `state` to become `killed`; `signal` ma
 
 If a configured `--abandon-job-after` limit actually terminated the job, expect `abandoned_by="abandon_job_after"` and `result_loss=true` alongside the unchanged terminal `state`. Both are absent when the limit never fired, so treat their presence as evidence that unfinished results may be missing.
 
-`schema_version` is the global stdout contract version, so event envelopes track it. Schema `0.3` added optional `status` fields only, and schema `0.4` added the optional launch-response `root` and optional `error.details`: the completion and output-match event field shapes are unchanged across both, and only the reported `schema_version` moved from `"0.2"` to `"0.3"` to `"0.4"`.
+`schema_version` is the global stdout contract version, so event envelopes track it. Schema `0.3` added optional `status` fields only, schema `0.4` added the optional launch-response `root` and optional `error.details`, and schema `0.5` added the `job_observation_inconsistent` wait error: the completion and output-match event field shapes are unchanged across all three, and only the reported `schema_version` moved from `"0.2"` to `"0.3"` to `"0.4"` to `"0.5"`. A `job_observation_inconsistent` wait error never produces a completion event, because it is not a job outcome.
 
 ## Sinks
 
