@@ -229,6 +229,12 @@ fn map_err_to_response(e: anyhow::Error) -> AxumResponse {
             Json(serde_json::to_value(inconsistent.error_response()).expect("error serialization")),
         )
             .into_response()
+    } else if let Some(unobserved) = e.downcast_ref::<crate::run::SupervisorHandoffUnobserved>() {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::to_value(unobserved.error_response()).expect("error serialization")),
+        )
+            .into_response()
     } else if let Some(amb) = e.downcast_ref::<crate::jobstore::AmbiguousJobId>() {
         let truncated = amb.candidates.len() > 20;
         let candidates: Vec<&str> = amb.candidates.iter().take(20).map(|s| s.as_str()).collect();
@@ -788,6 +794,30 @@ async fn abandon_response(
 mod tests {
     use super::*;
     use tower::ServiceExt as _;
+
+    #[tokio::test]
+    async fn handoff_uncertainty_keeps_recovery_reference_in_http_error() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let response = map_err_to_response(anyhow::Error::new(
+            crate::run::SupervisorHandoffUnobserved {
+                job_id: "sandbox-job".to_string(),
+                root: sandbox.path().to_path_buf(),
+                reason: "readiness deadline elapsed".to_string(),
+            },
+        ));
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["code"], "internal_error");
+        assert_eq!(json["error"]["retryable"], false);
+        assert_eq!(json["error"]["details"]["job_id"], "sandbox-job");
+        assert_eq!(
+            json["error"]["details"]["root"],
+            sandbox.path().to_str().unwrap()
+        );
+    }
 
     #[test]
     fn test_is_loopback_ipv4_localhost() {

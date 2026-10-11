@@ -1,16 +1,17 @@
 [package]
-name = "agent-exec"
-version = "0.2.40"
+name = "agent-wait-on"
+version = "0.3.0"
 edition = "2024"
+default-run = "agent-wait-on"
 
 # crates.io metadata
-authors = ["tumf <tumf@users.noreply.github.com>"]
+authors = ["iliya <iliyazelenkog@gmail.com>", "tumf <tumf@users.noreply.github.com>"]
 license = "MIT"
 description = "Non-interactive agent job runner. Runs commands as background jobs and returns structured JSON on stdout."
 readme = "README.md"
-repository = "https://github.com/tumf/agent-exec"
-homepage = "https://tumf.github.io/agent-exec/"
-documentation = "https://docs.rs/agent-exec"
+repository = "https://github.com/777genius/agent-wait-on"
+homepage = "https://github.com/777genius/agent-wait-on"
+documentation = "https://github.com/777genius/agent-wait-on#readme"
 keywords = ["agent", "job", "runner", "cli", "json"]
 categories = ["command-line-utilities", "development-tools"]
 include = [
@@ -27,6 +28,15 @@ include = [
 
 [[bin]]
 name = "agent-exec"
+path = "src/main.rs"
+
+# Keep the upstream library and CLI spelling for compatible consumers.
+[lib]
+name = "agent_exec"
+path = "src/lib.rs"
+
+[[bin]]
+name = "agent-wait-on"
 path = "src/main.rs"
 
 # Fixture consumer for the embedded managed-job API. It is a *separate* binary
@@ -65,7 +75,9 @@ schemars = "1"
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_JobObjects",
+    "Win32_System_SystemServices",
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
 ] }

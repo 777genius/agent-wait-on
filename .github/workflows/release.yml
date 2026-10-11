@@ -1,118 +1,100 @@
 name: Release
-
 on:
   push:
-    tags:
-      - "v*"
+    tags: ['v*']
   workflow_dispatch:
-    inputs:
-      publish_crates_io:
-        description: Publish the packaged crate to crates.io
-        required: false
-        default: false
-        type: boolean
-
 permissions:
   contents: read
-
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Package ${{ matrix.platform }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            archive: agent-exec-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+          - {os: ubuntu-24.04, target: x86_64-unknown-linux-gnu, platform: linux-amd64}
+          - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, platform: linux-arm64}
+          - {os: macos-15, target: aarch64-apple-darwin, platform: darwin-arm64}
+          - {os: macos-15-intel, target: x86_64-apple-darwin, platform: darwin-amd64}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - name: Build
-        run: cargo build --locked --release --target ${{ matrix.target }}
-      - name: Smoke test
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.x'
+      - name: Build release binary
+        run: cargo build --locked --release --bin agent-wait-on --target ${{ matrix.target }}
+      - name: Prepare native plugin package
+        shell: bash
+        run: |
+          binary="target/${{ matrix.target }}/release/agent-wait-on"
+          "$binary" --version
+          node --experimental-strip-types scripts/package-plugin.ts --binary "$binary" --platform '${{ matrix.platform }}' --output package-stage
+      - name: Smoke packaged runtime
         shell: bash
         env:
-          AGENT_EXEC_ROOT: ${{ runner.temp }}/agent-exec-smoke
+          AGENT_EXEC_ROOT: ${{ runner.temp }}/agent-wait-on-release-jobs
         run: |
-          binary="target/${{ matrix.target }}/release/agent-exec"
-          "$binary" --version
-          "$binary" run -- echo release-smoke | python3 -c 'import json, sys; response = json.load(sys.stdin); assert response["ok"] is True; assert response["state"] == "exited"; assert response["exit_code"] == 0'
-      - name: Package archive and checksum
+          binary=package-stage/bin/agent-wait-on
+          "$binary" schema > schema-result.json
+          "$binary" run --forever -- echo release-smoke > job-result.json
+          python3 -c 'import json; j=json.load(open("job-result.json")); assert j["state"]=="exited" and j["exit_code"]==0; assert json.load(open("schema-result.json"))["ok"]'
+      - name: Archive native plugin
+        env:
+          PLATFORM: ${{ matrix.platform }}
         shell: bash
         run: |
-          mkdir dist
-          binary="target/${{ matrix.target }}/release/agent-exec"
-          cp "$binary" agent-exec
-          tar -czf "dist/${{ matrix.archive }}" agent-exec
-          cd dist
-          shasum -a 256 "${{ matrix.archive }}" > "${{ matrix.archive }}.sha256"
-      - uses: actions/upload-artifact@v4
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+          stage = Path('package-stage')
+          version = json.loads((stage / 'plugin.json').read_text())['version']
+          Path('dist').mkdir(exist_ok=True)
+          archive = Path('dist') / f"agent-wait-on-v{version}-{os.environ['PLATFORM']}.zip"
+          with ZipFile(archive, 'w', compression=ZIP_DEFLATED) as output:
+              for path in sorted(stage.rglob('*')):
+                  if path.is_file():
+                      output.write(path, path.relative_to(stage).as_posix())
+          print(archive)
+          PY
+      - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.target }}
-          path: dist/
+          name: ${{ matrix.platform }}
+          path: dist/*
           if-no-files-found: error
-
-  package-smoke:
-    name: Verify packaged crate
+  draft:
+    name: Prepare verified release assets
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Package and install in isolation
-        shell: bash
-        run: |
-          cargo package --locked
-          target_dir=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
-          package_archive=$(printf '%s\n' "$target_dir"/package/agent-exec-*.crate)
-          package_root=$(mktemp -d)
-          tar -xzf "$package_archive" -C "$package_root"
-          package_dir=$(printf '%s\n' "$package_root"/agent-exec-*)
-          install_root=$(mktemp -d)
-          cargo install --path "$package_dir" --root "$install_root" --locked
-          "$install_root/bin/agent-exec" --version
-          AGENT_EXEC_ROOT=$(mktemp -d) "$install_root/bin/agent-exec" run -- echo package-smoke | python3 -c 'import json, sys; response = json.load(sys.stdin); assert response["ok"] is True; assert response["state"] == "exited"; assert response["exit_code"] == 0'
-
-  release:
-    name: Publish GitHub Release
-    needs: [build, package-smoke]
-    if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - name: Verify checksums
-        working-directory: dist
+      - name: Verify version and create checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          for checksum in *.sha256; do
-            shasum -a 256 -c "$checksum"
-          done
-      - name: Create release
+          python3 -c 'import os,tomllib; assert "v"+tomllib.load(open("Cargo.toml","rb"))["package"]["version"]==os.environ["RELEASE_TAG"]'
+          cp install.sh dist/
+          cd dist
+          sha256sum *.zip install.sh > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Create draft for installed verification
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --repo "$GITHUB_REPOSITORY"
-
-  publish-crates-io:
-    name: Publish crates.io
-    needs: package-smoke
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_crates_io
-    runs-on: ubuntu-latest
-    environment: crates-io
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Validate and publish
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          test -n "$CARGO_REGISTRY_TOKEN" || { echo "CARGO_REGISTRY_TOKEN is required for crates.io publication" >&2; exit 1; }
-          cargo package --locked
-          cargo publish --locked
+        run: gh release create "$GITHUB_REF_NAME" dist/* --draft --title "agent-wait-on $GITHUB_REF_NAME" --generate-notes --repo "$GITHUB_REPOSITORY"

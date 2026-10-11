@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "agent-wait-on": {
+      "type": "stdio",
+      "command": "./bin/agent-wait-on",
+      "args": ["mcp"],
+      "env": {
+        "AGENT_EXEC_ROOT": "${PLUGIN_DATA}/jobs",
+        "AGENT_EXEC_MCP_MAX_UNTIL_SECONDS": "50"
+      }
+    }
+  }
+}

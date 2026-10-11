@@ -626,7 +626,10 @@ fn mcp_run_rejects_unreadable_stdin_file_before_child_launch() {
     let mut mcp = McpProcess::start(harness.root());
     mcp.initialize();
 
+    #[cfg(unix)]
     let mut candidates = vec![missing];
+    #[cfg(not(unix))]
+    let candidates = [missing];
     // Root ignores mode bits, so only assert the unreadable case when it is real.
     #[cfg(unix)]
     if std::fs::read(&unreadable).is_err() {

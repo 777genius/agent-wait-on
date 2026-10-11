@@ -101,7 +101,7 @@ impl clap::builder::TypedValueParser for SignalValueParser {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "agent-exec")]
+#[command(name = env!("CARGO_BIN_NAME"))]
 #[command(version)]
 #[command(about = "Non-interactive agent job runner", long_about = None)]
 struct Cli {
@@ -806,6 +806,10 @@ fn main() {
             e.downcast_ref::<agent_exec::wait::JobObservationInconsistent>()
         {
             inconsistent.error_response().print();
+        } else if let Some(unobserved) =
+            e.downcast_ref::<agent_exec::run::SupervisorHandoffUnobserved>()
+        {
+            unobserved.error_response().print();
         } else if e.downcast_ref::<InvalidJobReference>().is_some()
             || e.downcast_ref::<NonUtf8Root>().is_some()
         {

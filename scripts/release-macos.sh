@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+printf '%s\n' 'This upstream release helper is retired. Use the agent-wait-on Release Actions workflow.' >&2
+exit 1
 set -euo pipefail
 
 usage() {
