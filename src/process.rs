@@ -43,7 +43,7 @@ pub fn pid_liveness(pid: u32) -> Option<bool> {
     unsafe {
         let _ = CloseHandle(handle);
     }
-    Some(ok && exit_code == STILL_ACTIVE.0)
+    Some(ok && exit_code == STILL_ACTIVE.0 as u32)
 }
 
 /// Best-effort liveness probe for a persisted PID.

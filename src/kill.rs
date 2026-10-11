@@ -231,14 +231,13 @@ fn send_signal(pid: u32, signal: &str, job_name: Option<&str>) -> Result<()> {
 
     // Path 1: named Job Object created by the supervisor is available.
     if let Some(name) = job_name {
-        use windows::Win32::System::JobObjects::{
-            JOB_OBJECT_ALL_ACCESS, OpenJobObjectW, TerminateJobObject,
-        };
+        use windows::Win32::System::JobObjects::{OpenJobObjectW, TerminateJobObject};
+        use windows::Win32::System::SystemServices::JOB_OBJECT_TERMINATE;
         use windows::core::HSTRING;
 
         let hname = HSTRING::from(name);
         unsafe {
-            let job = OpenJobObjectW(JOB_OBJECT_ALL_ACCESS, false, &hname)
+            let job = OpenJobObjectW(JOB_OBJECT_TERMINATE, false, &hname)
                 .map_err(|e| anyhow::anyhow!("OpenJobObjectW({name}) failed: {e}"))?;
             let result = TerminateJobObject(job, 1)
                 .map_err(|e| anyhow::anyhow!("TerminateJobObject({name}) failed: {e}"));

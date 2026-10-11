@@ -8645,15 +8645,20 @@ fn compression_system_log_json_env_route_preserves_raw_and_compresses() {
             < json["stdout"].as_str().unwrap_or("").len()
     );
 
+    // CI environments vary in size and secret-key order. Use only fixture
+    // variables, with a long synthetic value so masking actually compresses
+    // the two-entry output rather than triggering the expansion guard.
     let env = h.run(&[
         "run",
         "--compress",
         "route",
         "env",
-        "SECRET_TOKEN=super_secret_value",
+        "-i",
+        "SECRET_TOKEN=super_secret_value_super_secret_value_super_secret_value_super_secret_value",
         "AWS_REGION=us-east-1",
     ]);
     assert_eq!(env["compression"]["detected_kind"].as_str(), Some("env"));
+    assert_eq!(env["compression"]["applied"], true);
     let compressed_env = env["compression"]["stdout"].as_str().unwrap_or("");
     assert!(compressed_env.contains("SECRET_TOKEN=***"));
     assert!(!compressed_env.contains("super_secret_value"));

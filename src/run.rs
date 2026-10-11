@@ -3002,7 +3002,8 @@ fn assign_to_job_object(job_id: &str, pid: u32) -> Result<String> {
         let _ = CloseHandle(proc_handle);
         // Note: job handle is intentionally leaked here to keep the Job Object alive.
         // The handle will be closed when the supervisor process exits.
-        std::mem::forget(job);
+        // HANDLE is a raw Copy value without a destructor, so leaving scope
+        // does not close it; no mem::forget is needed to retain the OS handle.
     }
 
     info!(job_id, name = %job_name, "supervisor: child assigned to Job Object");
