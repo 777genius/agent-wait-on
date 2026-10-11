@@ -22,6 +22,7 @@ jobs:
   rust:
     name: Test (${{ matrix.os }})
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
@@ -38,8 +39,16 @@ jobs:
       - name: Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Prek
+      - name: Prek file checks
         uses: j178/prek-action@v1
+        env:
+          SKIP: cargo-fmt,cargo-clippy,cargo-test
+      - name: Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Rust clippy
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - name: Rust tests
+        run: cargo test --locked --all
 
   portable:
     name: Portable installer (${{ matrix.os }})

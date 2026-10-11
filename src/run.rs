@@ -537,6 +537,44 @@ impl std::fmt::Display for SupervisorLaunchFailed {
 
 impl std::error::Error for SupervisorLaunchFailed {}
 
+/// Startup was acknowledged, but the workload handoff could not be observed.
+/// Unlike a proven launch failure, this preserves an existing job that may
+/// still start. Callers must recover that job rather than repeat the launch.
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct SupervisorHandoffUnobserved {
+    pub job_id: String,
+    pub root: std::path::PathBuf,
+    pub reason: String,
+}
+
+impl SupervisorHandoffUnobserved {
+    /// Shared CLI/MCP/HTTP envelope using the existing internal-error contract.
+    pub fn error_response(&self) -> crate::schema::ErrorResponse {
+        crate::schema::ErrorResponse::new("internal_error", self.to_string(), false).with_details(
+            serde_json::json!({
+                "job_id": self.job_id,
+                "root": self.root.to_string_lossy(),
+            }),
+        )
+    }
+}
+
+impl std::fmt::Display for SupervisorHandoffUnobserved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "startup readiness unobserved for job {} under root {}: {}; \
+             job may still start; do not relaunch; recover this job with status or wait",
+            self.job_id,
+            self.root.display(),
+            self.reason
+        )
+    }
+}
+
+impl std::error::Error for SupervisorHandoffUnobserved {}
+
 /// Fixed startup acknowledgement deadline for a delegated supervisor.
 ///
 /// This is a launch-integrity check rather than workload observation, so it
@@ -721,6 +759,62 @@ fn await_supervisor_ack(job_dir: &JobDir, supervisor: &mut std::process::Child) 
     }
 }
 
+/// The initial acknowledgement owns a supervisor PID, not a workload PID.
+/// Do not expose that transitional PID to an immediate Unix `kill`, which
+/// would kill the state author and leave the workload's state stuck running.
+/// Failure here is observation uncertainty, not proof that no workload exists.
+#[cfg(unix)]
+fn await_workload_handoff(
+    job_dir: &JobDir,
+    supervisor: &mut std::process::Child,
+    deadline: std::time::Instant,
+) -> Result<()> {
+    loop {
+        if let Ok(state) = job_dir.read_state()
+            && (!state.status().is_non_terminal()
+                || (*state.status() == JobStatus::Running
+                    && state.pid.is_some_and(|pid| pid != supervisor.id())))
+        {
+            return Ok(());
+        }
+        if let Some(status) = supervisor.try_wait().map_err(|err| {
+            handoff_unobserved_error(job_dir, format!("could not observe supervisor exit: {err}"))
+        })? {
+            // A final state write can race the preceding read.
+            if let Ok(state) = job_dir.read_state()
+                && !state.status().is_non_terminal()
+            {
+                return Ok(());
+            }
+            return Err(handoff_unobserved_error(
+                job_dir,
+                format!("supervisor exited with {status} before publishing the workload PID"),
+            ));
+        }
+        if std::time::Instant::now() >= deadline {
+            // Acknowledgement ownership is unchanged. Never overwrite a live
+            // supervisor's state or return its transitional PID as a workload.
+            return Err(handoff_unobserved_error(
+                job_dir,
+                format!(
+                    "supervisor acknowledged startup but did not publish the workload PID within {}s",
+                    SUPERVISOR_ACK_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        std::thread::sleep(SUPERVISOR_ACK_POLL_INTERVAL);
+    }
+}
+
+#[cfg(unix)]
+fn handoff_unobserved_error(job_dir: &JobDir, reason: String) -> anyhow::Error {
+    anyhow::Error::new(SupervisorHandoffUnobserved {
+        job_id: job_dir.job_id.clone(),
+        root: job_dir.path.parent().unwrap_or(&job_dir.path).to_path_buf(),
+        reason,
+    })
+}
+
 pub fn open_child_stdin(job_dir: &JobDir, stdin_file: Option<&str>) -> Result<std::process::Stdio> {
     if let Some(path) = resolve_stdin_path(job_dir, stdin_file) {
         let file = std::fs::File::open(&path)
@@ -852,7 +946,11 @@ pub fn supervisor_argv(params: &SpawnSupervisorParams) -> Result<Vec<std::ffi::O
 /// The caller MUST have persisted the job's `created` state before calling this;
 /// the acknowledgement is detected as the supervisor's transition out of `created`.
 /// On success the job is `running` and supervision is detached from this process.
-/// On failure the job is left in terminal `failed` and no workload was launched.
+/// A proven pre-acknowledgement launch failure leaves the job terminal `failed`
+/// without launching a workload. After acknowledgement, an unobserved Unix
+/// workload handoff returns [`SupervisorHandoffUnobserved`] with the job ID and
+/// root retained. Its state is preserved and the workload may still start;
+/// recover that job instead of relaunching it.
 ///
 /// Returns the supervisor PID and the acknowledged `started_at` timestamp.
 /// Also handles the Windows Job Object handshake before returning.
@@ -893,6 +991,8 @@ pub fn spawn_supervisor_process(
     // The supervisor — not the launcher — publishes the initial `running` state,
     // so `running` is never observable unless validated delegated supervision
     // actually claimed this job.
+    #[cfg(unix)]
+    let startup_deadline = std::time::Instant::now() + SUPERVISOR_ACK_TIMEOUT;
     let started_at = match await_supervisor_ack(job_dir, &mut supervisor) {
         Ok(started_at) => started_at,
         Err(err) => {
@@ -900,6 +1000,12 @@ pub fn spawn_supervisor_process(
             return Err(err);
         }
     };
+
+    #[cfg(unix)]
+    if let Err(err) = await_workload_handoff(job_dir, &mut supervisor, startup_deadline) {
+        reap_spawned_child(supervisor);
+        return Err(err);
+    }
 
     // Windows Job Object handshake.
     #[cfg(windows)]
@@ -2906,6 +3012,37 @@ fn assign_to_job_object(job_id: &str, pid: u32) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handoff_uncertainty_preserves_nonretryable_recovery_reference() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let error = crate::embedded::JobError::from_anyhow(anyhow::Error::new(
+            SupervisorHandoffUnobserved {
+                job_id: "sandbox-job".to_string(),
+                root: sandbox.path().to_path_buf(),
+                reason: "workload PID not observed".to_string(),
+            },
+        ));
+        assert_eq!(error.kind(), crate::embedded::JobErrorKind::Internal);
+        assert!(!error.is_retryable());
+        assert!(error.message().contains("sandbox-job"));
+        assert!(error.message().contains(sandbox.path().to_str().unwrap()));
+        assert!(
+            error
+                .message()
+                .contains("job may still start; do not relaunch")
+        );
+        let source = error.into_source();
+        let unobserved = source
+            .downcast_ref::<SupervisorHandoffUnobserved>()
+            .unwrap();
+        let response = unobserved.error_response();
+        assert_eq!(response.error.code, "internal_error");
+        assert!(!response.error.retryable);
+        let details = response.error.details.unwrap();
+        assert_eq!(details["job_id"], "sandbox-job");
+        assert_eq!(details["root"], sandbox.path().to_str().unwrap());
+    }
 
     #[test]
     fn unfinished_output_is_framed_before_eof_and_raw_bytes_are_preserved() {

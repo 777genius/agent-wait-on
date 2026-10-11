@@ -806,6 +806,10 @@ fn main() {
             e.downcast_ref::<agent_exec::wait::JobObservationInconsistent>()
         {
             inconsistent.error_response().print();
+        } else if let Some(unobserved) =
+            e.downcast_ref::<agent_exec::run::SupervisorHandoffUnobserved>()
+        {
+            unobserved.error_response().print();
         } else if e.downcast_ref::<InvalidJobReference>().is_some()
             || e.downcast_ref::<NonUtf8Root>().is_some()
         {

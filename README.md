@@ -60,6 +60,9 @@ single MCP observation at 50 seconds to fit common 60-second client limits.
 `until` limits waiting, not execution: the workload continues afterward.
 A transport timeout means the result was not observed; it does not justify
 launching the workload again.
+If startup readiness cannot be observed after acknowledgement, the error
+retains its job reference in `error.details`; inspect that job before taking
+further action.
 
 For a long wait in the current agent turn, keep one host execution session:
 
@@ -96,7 +99,8 @@ agent-wait-on run --forever -- cargo test
 
 The `agent-exec` compatibility binary remains buildable, the library crate remains
 `agent_exec`, and existing `AGENT_EXEC_*` settings and `agent-exec.schema.json`
-are retained. [The upstream command reference](docs/UPSTREAM_README.md) describes
+are retained. Structured responses use schema version `0.5`.
+[The upstream command reference](docs/UPSTREAM_README.md) describes
 the inherited API; substitute the primary executable name `agent-wait-on`.
 The release package bundles the schema file. A Cargo-only installation needs
 `schema/agent-exec.schema.json` beside its binary to use the `schema` command.

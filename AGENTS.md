@@ -27,8 +27,8 @@ For agentic coding assistants operating in this repository.
 ## Project Snapshot
 
 - Language: Rust (edition 2024)
-- Crate: `agent-exec`
-- Binary: `agent-exec` (`src/main.rs`)
+- Package: `agent-wait-on`; library crate: `agent_exec`.
+- Primary binary: `agent-wait-on`; compatibility binary: `agent-exec` (`src/main.rs`).
 - Contract: stdout is JSON-only; diagnostic logs go to stderr (`src/main.rs`, `src/schema.rs`).
 - CI: runs `prek` hooks (`prek.toml`, `.github/workflows/ci.yml`).
 

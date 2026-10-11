@@ -9235,7 +9235,8 @@ fn status_reports_signal_and_logs_drained() {
     let h = TestHarness::new();
     let run_v = h.run(&["run", "--no-wait", "--", "sleep", "60"]);
     let job_id = run_v["job_id"].as_str().expect("job_id").to_string();
-    h.run(&["kill", "--signal", "TERM", &job_id]);
+    let kill_v = h.run(&["kill", "--signal", "TERM", &job_id]);
+    assert_envelope(&kill_v, "kill", true);
     let wait_v = h.run(&["wait", "--until", "10", &job_id]);
     assert_eq!(
         wait_v["state"], "killed",

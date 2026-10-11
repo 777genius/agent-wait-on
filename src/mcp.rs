@@ -312,6 +312,9 @@ fn domain_error(error: anyhow::Error) -> ErrorResponse {
     if let Some(inconsistent) = error.downcast_ref::<wait::JobObservationInconsistent>() {
         return inconsistent.error_response();
     }
+    if let Some(unobserved) = error.downcast_ref::<crate::run::SupervisorHandoffUnobserved>() {
+        return unobserved.error_response();
+    }
     let message = error.to_string();
     let code = if error
         .downcast_ref::<crate::reference::InvalidJobReference>()
@@ -537,7 +540,7 @@ impl ServerHandler for Mcp {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             instructions: Some(format!(
                 "Start each workload once and retain its job_id and root. Observation deadlines do not stop jobs. For long waits, use one host execution session running this installed executable with --root ROOT wait --forever JOB_ID. Installed executable (JSON path): {}. Do not start or resume agent turns automatically.",
-                json!(std::env::current_exe().ok())
+                serde_json::to_value(std::env::current_exe().ok()).unwrap_or(Value::Null)
             )),
             ..Default::default()
         }
@@ -553,6 +556,23 @@ mod tests {
         parse_until_seconds_value, seconds, stdin_source, until_seconds,
     };
     use crate::run::StdinSource;
+
+    #[test]
+    fn handoff_uncertainty_keeps_recovery_reference_in_mcp_error() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let response = super::domain_error(anyhow::Error::new(
+            crate::run::SupervisorHandoffUnobserved {
+                job_id: "sandbox-job".to_string(),
+                root: sandbox.path().to_path_buf(),
+                reason: "readiness deadline elapsed".to_string(),
+            },
+        ));
+        assert_eq!(response.error.code, "internal_error");
+        assert!(!response.error.retryable);
+        let details = response.error.details.unwrap();
+        assert_eq!(details["job_id"], "sandbox-job");
+        assert_eq!(details["root"], sandbox.path().to_str().unwrap());
+    }
 
     #[test]
     fn run_params_reject_unknown_fields() {

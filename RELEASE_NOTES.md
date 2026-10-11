@@ -6,6 +6,8 @@ copyrights are retained; see UPSTREAM.md.
 - Primary `agent-wait-on` binary and compatibility `agent-exec` binary.
 - Native universal plugin packages, bundled MCP server, and waiting skill.
 - Verified platform installers delegating client registration to UAP.
+- Unix launch waits for the workload PID handoff, preventing an immediate
+  `kill` from targeting the temporary supervisor PID and leaving stale state.
 - Bounded stream framing and command event delivery, without changing managed
   workload termination or the schema 0.5 result contract.
 

@@ -430,7 +430,7 @@ Common options:
 | `--stdin <VALUE>` | None | Provide input directly; `--stdin -` reads noninteractive caller input. Omit both stdin flags to forward piped caller input automatically. |
 | `--stdin-file <PATH>` | None | Copy file content to job-local input; takes precedence over automatic detection. |
 | `--stdin-max-bytes <BYTES>` | 64 MiB | Limit materialized input size, including automatically forwarded input. |
-| `--wait [true|false]` | `true` | Enable inline observation. A bare `--wait` means `true`. |
+| `--wait [true\|false]` | `true` | Enable inline observation. A bare `--wait` means `true`. |
 | `--until <SECONDS>` | `10` | Bound inline observation. |
 | `--forever` | `false` | Observe until the job becomes terminal. |
 | `--no-wait` | `false` | Return without observation. |

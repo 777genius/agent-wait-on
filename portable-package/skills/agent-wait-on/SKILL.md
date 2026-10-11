@@ -18,6 +18,10 @@ arguments. This plugin runs processes; it does not create or resume agent chats.
    60-second client request limits. A client can impose a shorter limit. Treat a
    transport timeout as unknown observation, then check the existing job; do not
    launch its workload again automatically.
+   If startup readiness cannot be observed after acknowledgement, an
+   `internal_error` retains the existing job reference in `error.details`
+   (`root`, `job_id`). The job may still start; inspect that reference instead
+   of repeating `run`.
 4. Use `status` to inspect state and `tail` to recover output when necessary.
    Terminal state is not proof of success: inspect the process exit code and
    the workload's own result.
