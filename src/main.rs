@@ -101,7 +101,7 @@ impl clap::builder::TypedValueParser for SignalValueParser {
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "agent-exec")]
+#[command(name = env!("CARGO_BIN_NAME"))]
 #[command(version)]
 #[command(about = "Non-interactive agent job runner", long_about = None)]
 struct Cli {

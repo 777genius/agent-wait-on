@@ -1370,6 +1370,8 @@ struct OutputMatchChecker {
     job_dir_path: std::path::PathBuf,
     shell_wrapper: Vec<String>,
     inner: std::sync::Mutex<OutputMatchInner>,
+    command_sinks_cancelled: std::sync::atomic::AtomicBool,
+    active_command_sinks: std::sync::atomic::AtomicUsize,
 }
 
 struct OutputMatchInner {
@@ -1388,6 +1390,8 @@ impl OutputMatchChecker {
             inner: std::sync::Mutex::new(OutputMatchInner {
                 config: initial_config,
             }),
+            command_sinks_cancelled: std::sync::atomic::AtomicBool::new(false),
+            active_command_sinks: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1493,13 +1497,16 @@ impl OutputMatchChecker {
         let mut delivery_results: Vec<crate::schema::SinkDeliveryResult> = Vec::new();
 
         if let Some(ref cmd) = match_cfg.command {
-            delivery_results.push(dispatch_command_sink(
+            self.active_command_sinks
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            delivery_results.push(dispatch_command_sink_with_cancel(
                 cmd,
                 &event_json,
                 job_id,
                 &events_path_str,
                 &self.shell_wrapper,
                 "job.output.matched",
+                Some(&self.command_sinks_cancelled),
             ));
         }
         if let Some(ref file_path) = match_cfg.file {
@@ -1519,8 +1526,15 @@ impl OutputMatchChecker {
         {
             let _ = writeln!(f, "{record_json}");
         }
+        if match_cfg.command.is_some() {
+            self.active_command_sinks
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 }
+
+// Bounds both unfinished full.log records and output-match event payloads.
+const MAX_LOG_FRAME_BYTES: usize = 64 * 1024;
 
 /// Stream bytes from a child process output pipe to an individual log file and
 /// to the shared `full.log`.
@@ -1528,16 +1542,20 @@ impl OutputMatchChecker {
 /// Reads byte chunks (not lines) so that output without a trailing newline is
 /// still captured in the individual log immediately.  The `full.log` format
 /// `"<RFC3339> [LABEL] <line>"` is maintained via a line-accumulation buffer:
-/// bytes are appended to the buffer until a newline is found, at which point a
-/// formatted line is written to `full.log`.  Any remaining bytes at EOF are
-/// flushed as a final line.
+/// bytes are appended until a newline or 64 KiB frame boundary is found. Long
+/// lines are split into independently timestamped records; a full frame is
+/// emitted before buffering the next byte, without waiting for newline/EOF.
+/// Any remaining bytes at EOF are flushed as a final record. Individual logs
+/// retain the exact raw bytes, including newlines and invalid UTF-8.
 ///
-/// The optional `on_line` callback is invoked for each complete line (without
-/// the trailing newline) and is used to drive output-match checking.
+/// The optional `on_line` callback checks each record independently (without
+/// the trailing newline). Patterns spanning a frame boundary do not match;
+/// regex anchors apply to each frame. Formatted records still decode UTF-8
+/// lossily, including code points split by a frame boundary.
 ///
 /// This helper is used by both the stdout and stderr monitoring threads inside
 /// [`supervise`], replacing the previously duplicated per-stream implementations.
-/// Buffer size (8192 bytes) and newline-split logic are preserved unchanged.
+/// Ordinary lines at or below the frame limit retain their previous semantics.
 fn stream_to_logs<R, F>(
     stream: R,
     log_path: &std::path::Path,
@@ -1552,8 +1570,17 @@ fn stream_to_logs<R, F>(
     let mut log_file = std::fs::File::create(log_path).expect("create stream log file in thread");
     let mut stream = stream;
     let mut buf = [0u8; 8192];
-    // Incomplete-line buffer for full.log formatting.
-    let mut line_buf: Vec<u8> = Vec::new();
+    let mut line_buf: Vec<u8> = Vec::with_capacity(MAX_LOG_FRAME_BYTES);
+    let emit_frame = |bytes: &[u8]| {
+        let line = String::from_utf8_lossy(bytes);
+        if let Ok(mut fl) = full_log.lock() {
+            let ts = now_rfc3339();
+            let _ = writeln!(fl, "{ts} [{label}] {line}");
+        }
+        if let Some(ref f) = on_line {
+            f(&line);
+        }
+    };
     loop {
         match stream.read(&mut buf) {
             Ok(0) => break, // EOF
@@ -1564,16 +1591,13 @@ fn stream_to_logs<R, F>(
                 // Accumulate bytes for full.log line formatting.
                 for &b in chunk {
                     if b == b'\n' {
-                        let line = String::from_utf8_lossy(&line_buf);
-                        if let Ok(mut fl) = full_log.lock() {
-                            let ts = now_rfc3339();
-                            let _ = writeln!(fl, "{ts} [{label}] {line}");
-                        }
-                        if let Some(ref f) = on_line {
-                            f(&line);
-                        }
+                        emit_frame(&line_buf);
                         line_buf.clear();
                     } else {
+                        if line_buf.len() == MAX_LOG_FRAME_BYTES {
+                            emit_frame(&line_buf);
+                            line_buf.clear();
+                        }
                         line_buf.push(b);
                     }
                 }
@@ -1583,14 +1607,7 @@ fn stream_to_logs<R, F>(
     }
     // Flush any remaining incomplete line to full.log and trigger callback.
     if !line_buf.is_empty() {
-        let line = String::from_utf8_lossy(&line_buf);
-        if let Ok(mut fl) = full_log.lock() {
-            let ts = now_rfc3339();
-            let _ = writeln!(fl, "{ts} [{label}] {line}");
-        }
-        if let Some(ref f) = on_line {
-            f(&line);
-        }
+        emit_frame(&line_buf);
     }
 }
 
@@ -2217,19 +2234,46 @@ fn supervise_inner(opts: SuperviseOpts, job_dir: &JobDir, acknowledged: &mut boo
     let remaining = drain_deadline
         .checked_duration_since(std::time::Instant::now())
         .unwrap_or(std::time::Duration::ZERO);
-    if rx_stdout_done.recv_timeout(remaining).is_ok() {
-        let _ = t_stdout.join();
-    } else {
-        drop(t_stdout); // detach: descendant holds the pipe open
-    }
+    let mut stdout_drained = rx_stdout_done.recv_timeout(remaining).is_ok();
 
     let remaining = drain_deadline
         .checked_duration_since(std::time::Instant::now())
         .unwrap_or(std::time::Duration::ZERO);
-    if rx_stderr_done.recv_timeout(remaining).is_ok() {
+    let mut stderr_drained = rx_stderr_done.recv_timeout(remaining).is_ok();
+
+    // A reader can also be waiting inside an output-match command sink. Cancel
+    // those owned deliveries before exiting; otherwise the shorter log-drain
+    // budget could tear down their threads before they enforce the sink budget.
+    match_checker
+        .command_sinks_cancelled
+        .store(true, Ordering::SeqCst);
+    if match_checker.active_command_sinks.load(Ordering::SeqCst) != 0 {
+        let sink_cleanup_deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(500);
+        if !stdout_drained {
+            stdout_drained = rx_stdout_done
+                .recv_timeout(
+                    sink_cleanup_deadline.saturating_duration_since(std::time::Instant::now()),
+                )
+                .is_ok();
+        }
+        if !stderr_drained {
+            stderr_drained = rx_stderr_done
+                .recv_timeout(
+                    sink_cleanup_deadline.saturating_duration_since(std::time::Instant::now()),
+                )
+                .is_ok();
+        }
+    }
+    if stdout_drained {
+        let _ = t_stdout.join();
+    } else {
+        drop(t_stdout); // detach: descendant holds the workload pipe open
+    }
+    if stderr_drained {
         let _ = t_stderr.join();
     } else {
-        drop(t_stderr); // detach: descendant holds the pipe open
+        drop(t_stderr);
     }
 
     state.logs_drained = true;
@@ -2319,6 +2363,10 @@ fn supervise_inner(opts: SuperviseOpts, job_dir: &JobDir, acknowledged: &mut boo
 ///
 /// The shell wrapper argv (e.g. `["sh", "-lc"]`) is provided by the caller.
 /// The command string is appended as the final argument to the wrapper.
+/// Writing stdin and waiting share a three-second budget. On Unix the sink has
+/// its own process group, so timeout cleanup cannot signal the workload group.
+/// Windows cleanup owns only the shell child: descendants may outlive it and
+/// keep the detached stdin writer alive. No workload Job Object is terminated.
 fn dispatch_command_sink(
     shell_cmd: &str,
     event_json: &str,
@@ -2327,9 +2375,38 @@ fn dispatch_command_sink(
     shell_wrapper: &[String],
     event_type: &str,
 ) -> crate::schema::SinkDeliveryResult {
-    use std::io::Write;
+    dispatch_command_sink_with_cancel(
+        shell_cmd,
+        event_json,
+        job_id,
+        event_path,
+        shell_wrapper,
+        event_type,
+        None,
+    )
+}
+
+fn dispatch_command_sink_with_cancel(
+    shell_cmd: &str,
+    event_json: &str,
+    job_id: &str,
+    event_path: &str,
+    shell_wrapper: &[String],
+    event_type: &str,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> crate::schema::SinkDeliveryResult {
     let attempted_at = now_rfc3339();
     let target = shell_cmd.to_string();
+
+    if sink_cancelled(cancelled) {
+        return crate::schema::SinkDeliveryResult {
+            sink_type: "command".to_string(),
+            target,
+            success: false,
+            error: Some("command sink cancelled after output drain deadline".to_string()),
+            attempted_at,
+        };
+    }
 
     if shell_cmd.trim().is_empty() {
         return crate::schema::SinkDeliveryResult {
@@ -2360,44 +2437,188 @@ fn dispatch_command_sink(
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
 
-    match cmd.spawn() {
+    let deadline = std::time::Instant::now() + COMMAND_SINK_TIMEOUT;
+    let delivery = match cmd.spawn() {
         Ok(mut child) => {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(event_json.as_bytes());
+            let result = (|| {
+                if let Some(stdin) = child.stdin.take() {
+                    write_command_sink_stdin(stdin, event_json.as_bytes(), deadline, cancelled)
+                        .map_err(|e| format!("stdin delivery error: {e}"))?;
+                }
+                loop {
+                    if sink_cancelled(cancelled) {
+                        return Err(
+                            "command sink cancelled after output drain deadline".to_string()
+                        );
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        return Err("command sink timed out after 3000 ms".to_string());
+                    }
+                    match child.try_wait() {
+                        Ok(Some(status)) => return Ok(status),
+                        Ok(None) => sink_poll_pause(deadline),
+                        Err(e) => return Err(format!("wait error: {e}")),
+                    }
+                }
+            })();
+            if result.is_err() {
+                terminate_command_sink(child);
             }
-            match child.wait() {
-                Ok(status) if status.success() => crate::schema::SinkDeliveryResult {
-                    sink_type: "command".to_string(),
-                    target,
-                    success: true,
-                    error: None,
-                    attempted_at,
-                },
-                Ok(status) => crate::schema::SinkDeliveryResult {
-                    sink_type: "command".to_string(),
-                    target,
-                    success: false,
-                    error: Some(format!("exited with status {status}")),
-                    attempted_at,
-                },
-                Err(e) => crate::schema::SinkDeliveryResult {
-                    sink_type: "command".to_string(),
-                    target,
-                    success: false,
-                    error: Some(format!("wait error: {e}")),
-                    attempted_at,
-                },
+            result.and_then(|status| {
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("exited with status {status}"))
+                }
+            })
+        }
+        Err(e) => Err(format!("spawn error: {e}")),
+    };
+    crate::schema::SinkDeliveryResult {
+        sink_type: "command".to_string(),
+        target,
+        success: delivery.is_ok(),
+        error: delivery.err(),
+        attempted_at,
+    }
+}
+
+const COMMAND_SINK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn sink_cancelled(cancelled: Option<&std::sync::atomic::AtomicBool>) -> bool {
+    cancelled.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+fn sink_stdin_cancelled() -> std::io::Error {
+    std::io::Error::other("command sink cancelled after output drain deadline")
+}
+
+fn sink_poll_pause(deadline: std::time::Instant) {
+    std::thread::sleep(
+        deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(std::time::Duration::from_millis(10)),
+    );
+}
+
+fn sink_stdin_timeout() -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        "command sink timed out after 3000 ms while writing stdin",
+    )
+}
+
+// A nonblocking pipe keeps the deadline enforceable even if a sink descendant
+// escapes its process group and keeps stdin open without reading.
+#[cfg(unix)]
+fn write_command_sink_stdin(
+    mut stdin: std::process::ChildStdin,
+    mut bytes: &[u8],
+    deadline: std::time::Instant,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+
+    let fd = stdin.as_raw_fd();
+    // SAFETY: fd is the live, exclusively owned child stdin pipe.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    while !bytes.is_empty() {
+        if sink_cancelled(cancelled) {
+            return Err(sink_stdin_cancelled());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(sink_stdin_timeout());
+        }
+        match stdin.write(bytes) {
+            Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+            Ok(n) => bytes = &bytes[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => sink_poll_pause(deadline),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+// Windows anonymous pipes do not support O_NONBLOCK. Keep the blocking writer
+// separate from delivery coordination, which always respects the same budget.
+#[cfg(not(unix))]
+fn write_command_sink_stdin(
+    mut stdin: std::process::ChildStdin,
+    bytes: &[u8],
+    deadline: std::time::Instant,
+    cancelled: Option<&std::sync::atomic::AtomicBool>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let bytes = bytes.to_vec();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("command-sink-stdin".to_string())
+        .spawn(move || {
+            let result = stdin.write_all(&bytes);
+            drop(stdin); // EOF must precede waiting for the sink's exit.
+            let _ = tx.send(result);
+        })?;
+    loop {
+        if sink_cancelled(cancelled) {
+            return Err(sink_stdin_cancelled());
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(sink_stdin_timeout());
+        }
+        match rx.recv_timeout(remaining.min(std::time::Duration::from_millis(10))) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(std::io::Error::other("command sink stdin writer stopped"));
             }
         }
-        Err(e) => crate::schema::SinkDeliveryResult {
-            sink_type: "command".to_string(),
-            target,
-            success: false,
-            error: Some(format!("spawn error: {e}")),
-            attempted_at,
-        },
     }
+}
+
+/// Terminate only this delivery's owned child/group, then reap its direct child.
+/// A bounded cleanup wait avoids turning a delivery timeout into another hang.
+fn terminate_command_sink(mut child: std::process::Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: process_group(0) established a dedicated group whose ID is
+        // this unreaped child's PID, never the workload or supervisor group.
+        let result = unsafe { libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL) };
+        if result == -1 {
+            warn!(error = %std::io::Error::last_os_error(), "command sink group cleanup failed");
+        }
+    }
+    // Also target the direct child if group cleanup failed or is unsupported.
+    let _ = child.kill();
+    let cleanup_deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) if std::time::Instant::now() < cleanup_deadline => {
+                sink_poll_pause(cleanup_deadline);
+            }
+            _ => break,
+        }
+    }
+    // Retain reaping responsibility without blocking the delivery record. This
+    // fallback is relevant only when OS termination/reaping is unusually slow.
+    let _ = std::thread::Builder::new()
+        .name("command-sink-reaper".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        });
 }
 
 /// Dispatch the file sink: append event JSON as a single NDJSON line.
@@ -2685,6 +2906,148 @@ fn assign_to_job_object(job_id: &str, pid: u32) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unfinished_output_is_framed_before_eof_and_raw_bytes_are_preserved() {
+        use std::cell::{Cell, RefCell};
+        use std::io::Read;
+        use std::sync::{Arc, Mutex};
+
+        struct ObservedEof<'a> {
+            input: std::io::Cursor<Vec<u8>>,
+            eof: &'a Cell<bool>,
+        }
+        impl Read for ObservedEof<'_> {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                let n = self.input.read(buf)?;
+                if n == 0 {
+                    self.eof.set(true);
+                }
+                Ok(n)
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let raw_path = tmp.path().join("stdout.log");
+        let full_path = tmp.path().join("full.log");
+        let full_log = Arc::new(Mutex::new(std::fs::File::create(&full_path).unwrap()));
+        // The first line exceeds the framing limit by over an order of magnitude.
+        // An exactly-full newline-terminated line must not add an empty record.
+        let mut input = vec![b'x'; 2 * 1024 * 1024 + 3];
+        input.push(b'\n');
+        input.extend(vec![b'y'; 64 * 1024]);
+        input.extend_from_slice(b"\n\nordinary\nfinal\xff");
+        let eof = Cell::new(false);
+        let records = RefCell::new(Vec::new());
+        let emitted_before_eof = Cell::new(0);
+        stream_to_logs(
+            ObservedEof {
+                input: std::io::Cursor::new(input.clone()),
+                eof: &eof,
+            },
+            &raw_path,
+            full_log,
+            "STDOUT",
+            Some(|line: &str| {
+                if !eof.get() {
+                    emitted_before_eof.set(emitted_before_eof.get() + 1);
+                }
+                records.borrow_mut().push(line.to_string());
+            }),
+        );
+        assert_eq!(std::fs::read(raw_path).unwrap(), input);
+        let records = records.into_inner();
+        assert_eq!(records.len(), 37);
+        assert!(records.iter().all(|line| line.len() <= 64 * 1024));
+        assert_eq!(emitted_before_eof.get(), 36);
+        assert_eq!(records[32], "xxx");
+        assert_eq!(records[33], "y".repeat(64 * 1024));
+        assert_eq!(&records[34..], &["", "ordinary", "final\u{fffd}"]);
+        let formatted = std::fs::read_to_string(full_path).unwrap();
+        let full_records: Vec<_> = formatted
+            .lines()
+            .map(|line| line.split_once("[STDOUT] ").unwrap().1)
+            .collect();
+        assert_eq!(full_records, records);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_sink_nonreader_times_out_and_only_its_group_is_terminated() {
+        use std::time::{Duration, Instant};
+
+        struct OwnedChild(std::process::Child);
+        impl Drop for OwnedChild {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let shell_pid = tmp.path().join("shell.pid");
+        let descendant_pid = tmp.path().join("descendant.pid");
+        let command = format!(
+            "echo $$ > '{}'; sleep 30 & echo $! > '{}'; wait",
+            shell_pid.display(),
+            descendant_pid.display(),
+        );
+        let mut unrelated = OwnedChild(Command::new("sleep").arg("30").spawn().unwrap());
+        let started = Instant::now();
+        let delivery = dispatch_command_sink(
+            &command,
+            &"x".repeat(2 * 1024 * 1024),
+            "sandbox-job",
+            tmp.path().join("event.json").to_str().unwrap(),
+            &["sh".to_string(), "-c".to_string()],
+            "job.output.matched",
+        );
+        assert!(!delivery.success, "a nonreader cannot accept the event");
+        assert!(delivery.error.as_deref().unwrap().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(unrelated.0.try_wait().unwrap().is_none());
+        let shell: i32 = std::fs::read_to_string(shell_pid)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // The direct sink child must have been killed and reaped.
+        assert_eq!(unsafe { libc::kill(shell, 0) }, -1);
+        let descendant = std::fs::read_to_string(descendant_pid).unwrap();
+        let output = Command::new("ps")
+            .args(["-o", "stat=", "-p", descendant.trim()])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stat.trim().is_empty() || stat.trim().starts_with('Z'),
+            "sink descendant is still running: {stat}"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn command_sink_windows_nonreader_respects_delivery_deadline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        // PowerShell itself is the owned child, and Start-Sleep creates no
+        // descendants. This proves the Windows own-child deadline, not a tree.
+        let delivery = dispatch_command_sink(
+            "Start-Sleep -Seconds 30",
+            &"x".repeat(2 * 1024 * 1024),
+            "sandbox-job",
+            tmp.path().join("event.json").to_str().unwrap(),
+            &[
+                "powershell.exe".to_string(),
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+            ],
+            "job.output.matched",
+        );
+        assert!(!delivery.success);
+        assert!(delivery.error.as_deref().unwrap().contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
 
     #[test]
     fn abandon_job_after_zero_needs_no_acknowledgement() {

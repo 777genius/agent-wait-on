@@ -1,4 +1,14 @@
-# Agent Guide (agent-exec)
+# Agent Guide (agent-wait-on)
+
+This downstream preserves the upstream lifecycle and JSON contracts. The package
+and primary binary are `agent-wait-on`; `agent-exec` remains a compatibility binary
+and `agent_exec` remains the library name. Keep upstream copyrights and ancestry.
+Portable packages contain a native binary and skill; UAP owns client registration.
+Do not add downloading or installation to MCP server startup. Tooling checks:
+`cd scripts && npm ci --ignore-scripts && npm run typecheck && npm test`.
+Use disposable profiles for client installation tests, including HOME,
+CODEX_HOME, CLAUDE_CONFIG_DIR and AGENTPLUGINS_HOME. Never launch agent turns as
+part of a waiting integration. See UPSTREAM.md for source synchronization.
 
 For agentic coding assistants operating in this repository.
 

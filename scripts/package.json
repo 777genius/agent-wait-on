@@ -1,0 +1,13 @@
+{
+  "name": "agent-wait-on-release-tools",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types installer-tests.ts"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.5",
+    "typescript": "7.0.2"
+  }
+}

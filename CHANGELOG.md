@@ -1,5 +1,8 @@
 # Changelog
 
+Downstream release history: see [RELEASE_NOTES.md](RELEASE_NOTES.md) for
+agent-wait-on 0.3.0. The stdout contract remains schema 0.5.
+
 Versioned history of the `schema_version` stdout JSON contract.
 
 Backward-compatible additions (optional fields, new enum variants) bump MINOR.

@@ -2,7 +2,9 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -21,8 +23,9 @@ jobs:
     name: Test (${{ matrix.os }})
     strategy:
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -37,3 +40,26 @@ jobs:
 
       - name: Prek
         uses: j178/prek-action@v1
+
+  portable:
+    name: Portable installer (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: scripts/package-lock.json
+      - name: Install tooling
+        working-directory: scripts
+        run: npm ci --ignore-scripts
+      - name: Typecheck
+        working-directory: scripts
+        run: npm run typecheck
+      - name: Installer fixtures
+        run: node --experimental-strip-types scripts/installer-tests.ts

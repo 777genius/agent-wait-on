@@ -1,0 +1,10 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "agent-wait-on",
+  "version": "0.3.0",
+  "description": "Run managed commands and wait for their results without repeated agent polling.",
+  "author": { "name": "777genius", "url": "https://github.com/777genius" },
+  "repository": "https://github.com/777genius/agent-wait-on",
+  "license": "MIT",
+  "keywords": ["jobs", "wait", "mcp", "ci"]
+}

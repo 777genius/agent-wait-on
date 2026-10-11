@@ -1,4 +1,5 @@
 /target/
+/scripts/node_modules/
 skills/dist/
 **/*.rs.bk
 .leann

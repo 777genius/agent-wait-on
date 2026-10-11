@@ -535,6 +535,10 @@ impl ServerHandler for Mcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             capabilities: ServerCapabilities::builder().enable_tools().build(),
+            instructions: Some(format!(
+                "Start each workload once and retain its job_id and root. Observation deadlines do not stop jobs. For long waits, use one host execution session running this installed executable with --root ROOT wait --forever JOB_ID. Installed executable (JSON path): {}. Do not start or resume agent turns automatically.",
+                json!(std::env::current_exe().ok())
+            )),
             ..Default::default()
         }
     }
