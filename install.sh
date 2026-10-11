@@ -13,7 +13,7 @@ case "$(uname -s):$(uname -m)" in
   Darwin:x86_64|Darwin:amd64) PLATFORM=darwin-amd64 ;;
   Linux:x86_64|Linux:amd64) PLATFORM=linux-amd64 ;;
   Linux:arm64|Linux:aarch64) PLATFORM=linux-arm64 ;;
-  *) printf 'Unsupported platform. Windows users: use install.ps1.\n' >&2; exit 1 ;;
+  *) printf 'Unsupported platform. Version 0.3.0 supports macOS and Linux; Windows support is tracked in issue #4.\n' >&2; exit 1 ;;
 esac
 for tool in curl unzip diff awk; do
   command -v "$tool" >/dev/null 2>&1 || { printf 'Required command missing: %s\n' "$tool" >&2; exit 1; }
