@@ -51,8 +51,7 @@ Without a saved response, use the returned root explicitly:
 "${PLUGIN_ROOT}/bin/agent-wait-on" --root /absolute/jobs wait --forever JOB_ID
 ```
 
-On Windows, use `& "$env:PLUGIN_ROOT/bin/agent-wait-on.exe"` with the same
-arguments. Resolve `PLUGIN_ROOT` from the client-provided installed plugin root,
+Resolve `PLUGIN_ROOT` from the client-provided installed plugin root,
 the executable path reported in the MCP server initialization instructions,
 or the installed package location reported by the installer. The examples are
 placeholders: UAP relocates MCP command/args/env fields, but does not expand

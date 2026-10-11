@@ -18,7 +18,6 @@ jobs:
           - {os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, platform: linux-arm64}
           - {os: macos-15, target: aarch64-apple-darwin, platform: darwin-arm64}
           - {os: macos-15-intel, target: x86_64-apple-darwin, platform: darwin-amd64}
-          - {os: windows-latest, target: x86_64-pc-windows-msvc, platform: windows-amd64}
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -37,7 +36,6 @@ jobs:
         shell: bash
         run: |
           binary="target/${{ matrix.target }}/release/agent-wait-on"
-          if [ '${{ runner.os }}' = 'Windows' ]; then binary="$binary.exe"; fi
           "$binary" --version
           node --experimental-strip-types scripts/package-plugin.ts --binary "$binary" --platform '${{ matrix.platform }}' --output package-stage
       - name: Smoke packaged runtime
@@ -46,7 +44,6 @@ jobs:
           AGENT_EXEC_ROOT: ${{ runner.temp }}/agent-wait-on-release-jobs
         run: |
           binary=package-stage/bin/agent-wait-on
-          if [ '${{ runner.os }}' = 'Windows' ]; then binary="$binary.exe"; fi
           "$binary" schema > schema-result.json
           "$binary" run --forever -- echo release-smoke > job-result.json
           python3 -c 'import json; j=json.load(open("job-result.json")); assert j["state"]=="exited" and j["exit_code"]==0; assert json.load(open("schema-result.json"))["ok"]'
@@ -93,9 +90,9 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           python3 -c 'import os,tomllib; assert "v"+tomllib.load(open("Cargo.toml","rb"))["package"]["version"]==os.environ["RELEASE_TAG"]'
-          cp install.sh install.ps1 dist/
+          cp install.sh dist/
           cd dist
-          sha256sum *.zip install.sh install.ps1 > SHA256SUMS
+          sha256sum *.zip install.sh > SHA256SUMS
           sha256sum -c SHA256SUMS
       - name: Create draft for installed verification
         env:

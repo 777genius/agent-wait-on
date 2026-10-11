@@ -5,7 +5,8 @@ copyrights are retained; see UPSTREAM.md.
 
 - Primary `agent-wait-on` binary and compatibility `agent-exec` binary.
 - Native universal plugin packages, bundled MCP server, and waiting skill.
-- Verified platform installers delegating client registration to UAP.
+- Four release platforms: macOS arm64/amd64 and Linux arm64/amd64 (glibc).
+- Verified shell installer delegating client registration to UAP.
 - Unix launch waits for the workload PID handoff, preventing an immediate
   `kill` from targeting the temporary supervisor PID and leaving stale state.
 - Bounded stream framing and command event delivery, without changing managed
@@ -16,12 +17,14 @@ matching use frames of at most 64 KiB of raw input, so a regex spanning frame bo
 not guaranteed to match. Failed raw log writes are not yet surfaced as a
 dedicated capture-health result.
 
+Windows is not release-supported in 0.3.0; follow the
+[Windows port](https://github.com/777genius/agent-wait-on/issues/4). Inherited Windows runtime tests
+expose lock access and platform-specific fixture failures that need separate
+porting work. The PowerShell installer and Windows package builder remain
+development prototypes and are not published as release assets.
+
 On Unix, timed-out event commands are terminated as an owned process group.
-On Windows, cleanup terminates and reaps its owned shell child; descendants
-may survive. A descendant retaining inherited stdin can keep the detached
-writer alive until the pipe closes or the supervisor exits. This cleanup never
-terminates the workload's Job Object. Unix descendants escaping the owned
-process group are likewise outside the cleanup guarantee.
+Descendants escaping that group are outside the cleanup guarantee.
 
 MCP observations are capped at 50 seconds in the portable package. For long
 waits, use CLI `wait --forever` within one host tool execution session. Native

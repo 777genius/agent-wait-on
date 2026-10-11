@@ -17,23 +17,22 @@ curl -fsSL https://github.com/777genius/agent-wait-on/releases/download/v0.3.0/i
 sh /tmp/agent-wait-on-install.sh --target codex,claude
 ```
 
-Windows PowerShell:
-
-```powershell
-Invoke-WebRequest https://github.com/777genius/agent-wait-on/releases/download/v0.3.0/install.ps1 -OutFile "$env:TEMP/agent-wait-on-install.ps1"
-& "$env:TEMP/agent-wait-on-install.ps1" --target codex,claude
-```
+Windows support is deferred to [the Windows port](https://github.com/777genius/agent-wait-on/issues/4).
+Version 0.3.0 does not provide a supported Windows
+runtime or release installer. The repository retains the PowerShell installer
+prototype and fixture checks for future Windows work; they do not establish
+runtime support.
 
 Select only `codex` or `claude` when appropriate; omit `--target` for UAP's
 client discovery. Install [UAP](https://github.com/777genius/universal-agent-plugins)
 first, or have Node.js/npm available so the installer can invoke pinned
 `universal-agent-plugins@0.1.80` through `npx`. Native binaries are supplied for
-macOS arm64/amd64, Linux arm64/amd64 (glibc), and Windows amd64.
+macOS arm64/amd64 and Linux arm64/amd64 (glibc).
 
 The installer verifies the release ZIP's SHA256 and retains an immutable
 versioned package source, then delegates validation and client registration to
 UAP. It does not install a global binary on `PATH`. The printed package path
-contains `bin/agent-wait-on` (`.exe` on Windows). Job data is kept separately
+contains `bin/agent-wait-on`. Job data is kept separately
 under UAP's `PLUGIN_DATA`, and survives an observation timeout or MCP disconnect.
 
 Codex CLI and Codex Desktop use the same Codex plugin configuration when they
@@ -122,7 +121,8 @@ npm run typecheck
 npm test
 ```
 
-Rust/installer CI runs on Linux, macOS, and Windows. Release CI builds all five
+Rust CI runs on supported Linux and macOS hosts. Installer fixture checks also
+cover the Windows prototype. Release CI builds all four supported
 native packages, smoke-tests packaged binaries, and creates a draft containing
-ZIPs, installers, and SHA256SUMS. Publication follows artifact and installed
+ZIPs, `install.sh`, and SHA256SUMS. Publication follows artifact and installed
 package verification. Keep client tests in disposable isolated profiles.
