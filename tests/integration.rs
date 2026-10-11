@@ -7875,6 +7875,13 @@ fn write_compression_config(dir: &std::path::Path, mode: &str) -> std::path::Pat
     path
 }
 
+fn wait_for_compression_fixture(h: &TestHarness, job_id: &str) {
+    // Inline run/start output is an early snapshot, not a completion barrier.
+    let completed = h.run(&["wait", "--until", "10", job_id]);
+    assert_envelope(&completed, "wait", true);
+    assert_eq!(completed["state"], "exited", "{completed}");
+}
+
 #[test]
 fn compression_default_route_and_off_preserve_raw_fields() {
     let h = TestHarness::new();
@@ -7979,6 +7986,7 @@ fn compression_is_wired_for_start_restart_and_tail() {
     assert_envelope(&start, "start", true);
     assert_eq!(start["compression"]["mode"].as_str(), Some("logs"));
 
+    wait_for_compression_fixture(&h, &job_id);
     let tail = h.run(&["tail", "--rtk", "logs", &job_id]);
     assert_envelope(&tail, "tail", true);
     assert_eq!(tail["compression"]["mode"].as_str(), Some("logs"));
@@ -8015,7 +8023,7 @@ fn compression_modes_have_behavior_for_errors_logs_and_json() {
         Some("error: boom")
     );
 
-    let logs = h.run(&[
+    let logs_run = h.run(&[
         "run",
         "--compress",
         "logs",
@@ -8023,6 +8031,10 @@ fn compression_modes_have_behavior_for_errors_logs_and_json() {
         "-c",
         "for i in $(seq 1 20); do printf 'x\\n'; done; printf 'y\\n'",
     ]);
+    assert_envelope(&logs_run, "run", true);
+    let job_id = logs_run["job_id"].as_str().unwrap();
+    wait_for_compression_fixture(&h, job_id);
+    let logs = h.run(&["tail", "--compress", "logs", job_id]);
     assert!(
         logs["compression"]["stdout"]
             .as_str()
@@ -8118,7 +8130,7 @@ fn compression_expansion_guard_suppresses_ndjson_tail_payload() {
 #[test]
 fn compression_smaller_output_still_applies() {
     let h = TestHarness::new();
-    let v = h.run(&[
+    let run = h.run(&[
         "run",
         "--compress",
         "logs",
@@ -8126,7 +8138,11 @@ fn compression_smaller_output_still_applies() {
         "-c",
         "for i in $(seq 1 40); do printf 'repeat-me\n'; done",
     ]);
-    assert_envelope(&v, "run", true);
+    assert_envelope(&run, "run", true);
+    let job_id = run["job_id"].as_str().unwrap();
+    wait_for_compression_fixture(&h, job_id);
+    let v = h.run(&["tail", "--compress", "logs", job_id]);
+    assert_envelope(&v, "tail", true);
     assert_eq!(v["compression"]["applied"].as_bool(), Some(true));
     let raw = v["stdout"].as_str().unwrap();
     let compressed = v["compression"]["stdout"].as_str().unwrap();
@@ -8444,7 +8460,7 @@ fn compression_route_boundary_pairs_output_shape_with_matching_summarizer() {
         "json route should use json summarizer: {json}"
     );
 
-    let logs = h.run(&[
+    let logs_run = h.run(&[
         "run",
         "--rtk",
         "route",
@@ -8453,7 +8469,11 @@ fn compression_route_boundary_pairs_output_shape_with_matching_summarizer() {
         "-c",
         "for i in range(60): print('ERROR repeated boundary line')",
     ]);
-    assert_envelope(&logs, "run", true);
+    assert_envelope(&logs_run, "run", true);
+    let job_id = logs_run["job_id"].as_str().unwrap();
+    wait_for_compression_fixture(&h, job_id);
+    let logs = h.run(&["tail", "--tail-lines", "100", "--rtk", "route", job_id]);
+    assert_envelope(&logs, "tail", true);
     assert_eq!(logs["compression"]["detected_kind"].as_str(), Some("logs"));
     assert!(
         logs["compression"]["stdout"]

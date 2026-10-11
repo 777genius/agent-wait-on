@@ -156,10 +156,28 @@ fn launch(root: &Path, args: &[&str]) -> Value {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
+    // Drain while the CLI runs: an inline JSON response can exceed the pipe's
+    // capacity, so waiting for exit before reading would deadlock the fixture.
+    let mut stdout = child.stdout.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let mut stderr = child.stderr.take().unwrap();
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if child.try_wait().unwrap().is_some() {
-            let output = child.wait_with_output().unwrap();
+        if let Some(status) = child.try_wait().unwrap() {
+            let output = std::process::Output {
+                status,
+                stdout: stdout_reader.join().unwrap(),
+                stderr: stderr_reader.join().unwrap(),
+            };
             assert!(output.status.success(), "{output:?}");
             return serde_json::from_slice(&output.stdout).unwrap();
         }
