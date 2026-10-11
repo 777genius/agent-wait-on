@@ -8812,6 +8812,7 @@ fn supervisor_reaping_neither_blocks_the_launcher_nor_signals_the_child() {
 // Hermes installation is involved: the fake binary only records its argv.
 
 /// Absolute path to the tracked Hermes completion helper.
+#[cfg(unix)]
 fn hermes_hook_path() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("skills/agent-exec/scripts/hermes-notify-hook")
@@ -8824,6 +8825,7 @@ fn hermes_reference_path() -> std::path::PathBuf {
 
 /// Write an executable fake `hermes` that appends one line per argument to
 /// `argv_file`, and return its path.
+#[cfg(unix)]
 fn write_fake_hermes(dir: &std::path::Path, argv_file: &std::path::Path) -> std::path::PathBuf {
     let fake = dir.join("hermes");
     std::fs::write(
@@ -8844,6 +8846,7 @@ fn write_fake_hermes(dir: &std::path::Path, argv_file: &std::path::Path) -> std:
 }
 
 /// Resolve the system `bash` used by the helper's shebang.
+#[cfg(unix)]
 fn system_bash() -> std::path::PathBuf {
     let out = Command::new("/bin/sh")
         .args(["-c", "command -v bash"])

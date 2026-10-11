@@ -46,8 +46,11 @@ jobs:
       - name: Rust formatting
         run: cargo fmt --all -- --check
       - name: Rust clippy
+        id: clippy
         run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Rust tests
+        # Collect test evidence after lint failure; the failed lint still fails CI.
+        if: ${{ !cancelled() && (success() || steps.clippy.outcome == 'failure') }}
         run: cargo test --locked --all
 
   portable:
