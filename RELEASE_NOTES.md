@@ -10,7 +10,7 @@ copyrights are retained; see UPSTREAM.md.
   workload termination or the schema 0.5 result contract.
 
 Raw per-stream logs retain their bytes. Combined logs and output-match event
-matching use frames of at most 64 KiB, so a regex spanning frame boundaries is
+matching use frames of at most 64 KiB of raw input, so a regex spanning frame boundaries is
 not guaranteed to match. Failed raw log writes are not yet surfaced as a
 dedicated capture-health result.
 

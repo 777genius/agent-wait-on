@@ -92,15 +92,16 @@ Build from source with stable Rust:
 ```sh
 cargo install --git https://github.com/777genius/agent-wait-on --tag v0.3.0 --bin agent-wait-on --locked
 agent-wait-on run --forever -- cargo test
-agent-wait-on schema
 ```
 
 The `agent-exec` compatibility binary remains buildable, the library crate remains
 `agent_exec`, and existing `AGENT_EXEC_*` settings and `agent-exec.schema.json`
 are retained. [The upstream command reference](docs/UPSTREAM_README.md) describes
 the inherited API; substitute the primary executable name `agent-wait-on`.
+The release package bundles the schema file. A Cargo-only installation needs
+`schema/agent-exec.schema.json` beside its binary to use the `schema` command.
 
-Output framing is bounded at 64 KiB. Raw stdout/stderr logs retain original
+Output framing is bounded at 64 KiB of raw input per frame. Raw stdout/stderr logs retain original
 bytes; combined logs and output-match events may split an exceptionally long
 line into frames. Event-command delivery has a bounded deadline. Review
 [release notes](RELEASE_NOTES.md) for platform-specific limitations.
